@@ -5,8 +5,6 @@ Built on **OpenAL**, it provides a **completely independent audio system separat
 
 This mod is suitable for scenarios that require higher‑level sound control, such as **command‑block systems, server scripts, map‑making, story‑driven performances, and sound experiments**.
 
-- This document was written by AI.
-
 ---
 
 ## Core Features
