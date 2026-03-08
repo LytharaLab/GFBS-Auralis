@@ -3,6 +3,7 @@ package org.mirage.gfbs.auralis;
 import com.mojang.logging.LogUtils;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.GameShuttingDownEvent;
 import net.minecraftforge.event.TickEvent;
@@ -18,10 +19,13 @@ import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import org.mirage.gfbs.auralis.api.AuralisApi;
 import org.slf4j.Logger;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 @Mod(GFBsAuralis.MODID)
 public class GFBsAuralis {
     public static final String MODID = "gfbs_auralis";
     public static final Logger LOGGER = LogUtils.getLogger();
+    private static final AtomicBoolean JVM_HOOK_INSTALLED = new AtomicBoolean(false);
 
     public GFBsAuralis() {
         IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
@@ -39,6 +43,7 @@ public class GFBsAuralis {
 
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> {
             event.enqueueWork(() -> {
+                installJvmShutdownHook();
                 var cfg = GFBsAuralisConfig.CLIENT;
                 AuralisAL al = AuralisAL.createAndStartGlobal(AuralisAL.Config.defaultsWithHrtf(cfg.enableHrtf.get()));
                 int configuredMaxSources = cfg.maxSources.get();
@@ -57,6 +62,17 @@ public class GFBsAuralis {
                 LOGGER.info("Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={})", effectiveMaxSources, configuredMaxSources, reserve);
             });
         });
+    }
+
+    private static void installJvmShutdownHook() {
+        if (!JVM_HOOK_INSTALLED.compareAndSet(false, true)) return;
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                AuralisAL.stopAndClearGlobal();
+            } catch (Throwable t) {
+                LOGGER.warn("Error stopping AuralisAL during JVM shutdown: {}", String.valueOf(t.getMessage()), t);
+            }
+        }, "AuralisAL-JvmShutdownHook"));
     }
 
     @SubscribeEvent
@@ -84,8 +100,18 @@ public class GFBsAuralis {
         @SubscribeEvent
         public static void onClientShutdown(GameShuttingDownEvent e){
             if (AuralisApi.isInitialized()) {
-                AuralisApi.engine().shutdown();
+                var eng = AuralisApi.engine();
+                if (eng instanceof AuralisEngine impl) {
+                    impl.shutdown(false);
+                } else {
+                    eng.shutdown();
+                }
             }
+        }
+
+        @SubscribeEvent
+        public static void onClientLoggedOut(ClientPlayerNetworkEvent.LoggingOut e) {
+            ClientSoundController.stopAll();
         }
     }
 }

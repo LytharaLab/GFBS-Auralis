@@ -21,7 +21,7 @@ package org.mirage.gfbs.auralis;
  * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-import org.lwjgl.openal.AL11;
+import org.lwjgl.openal.AL10;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
@@ -51,12 +51,12 @@ final class OpenALSourcePool implements AutoCloseable {
         this.adaptiveMaxSources = maxSources;
     }
 
-    @Nullable SourceHandle acquire() {
-        SourceHandle h = tryAcquire();
+    @Nullable SourceHandle acquire(AuralisSoundInstanceImpl instance) {
+        SourceHandle h = tryAcquire(instance);
         if (h != null) return h;
 
         if (evictLowestPriorityNonLooping()) {
-            h = tryAcquire();
+            h = tryAcquire(instance);
             if (h != null) return h;
         }
 
@@ -64,11 +64,12 @@ final class OpenALSourcePool implements AutoCloseable {
         return null;
     }
 
-    private @Nullable SourceHandle tryAcquire() {
+    private @Nullable SourceHandle tryAcquire(AuralisSoundInstanceImpl instance) {
         SourceHandle reused;
         synchronized (lock) {
             reused = free.pollFirst();
             if (reused != null) {
+                sourceToInstance.put(reused, instance);
                 inUse.add(reused);
                 return reused;
             }
@@ -79,10 +80,10 @@ final class OpenALSourcePool implements AutoCloseable {
         int id;
         try {
             id = al.callBlocking(() -> {
-                AL11.alGetError();
-                int sid = AL11.alGenSources();
-                int err = AL11.alGetError();
-                return (sid != 0 && err == AL11.AL_NO_ERROR) ? sid : 0;
+                AL10.alGetError();
+                int sid = AL10.alGenSources();
+                int err = AL10.alGetError();
+                return (sid != 0 && err == AL10.AL_NO_ERROR) ? sid : 0;
             });
         } catch (Throwable t) {
             id = 0;
@@ -106,6 +107,7 @@ final class OpenALSourcePool implements AutoCloseable {
         SourceHandle created = new SourceHandle(id);
         synchronized (lock) {
             allSources.add(created);
+            sourceToInstance.put(created, instance);
             inUse.add(created);
         }
         return created;
@@ -161,8 +163,8 @@ final class OpenALSourcePool implements AutoCloseable {
         List<SourceHandle> stopped = al.callBlocking(() -> {
             List<SourceHandle> out = new ArrayList<>();
             for (SourceHandle h : candidates) {
-                int state = AL11.alGetSourcei(h.sourceId(), AL11.AL_SOURCE_STATE);
-                if (state == AL11.AL_STOPPED) {
+                int state = AL10.alGetSourcei(h.sourceId(), AL10.AL_SOURCE_STATE);
+                if (state == AL10.AL_STOPPED) {
                     out.add(h);
                 }
             }
@@ -217,8 +219,8 @@ final class OpenALSourcePool implements AutoCloseable {
         }
         al.executeBlocking(() -> {
             for (SourceHandle h : all) {
-                AL11.alSourceStop(h.sourceId());
-                AL11.alDeleteSources(h.sourceId());
+                AL10.alSourceStop(h.sourceId());
+                AL10.alDeleteSources(h.sourceId());
             }
         });
     }

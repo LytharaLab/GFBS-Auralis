@@ -22,6 +22,7 @@ package org.mirage.gfbs.auralis.api;
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 import net.minecraft.world.phys.Vec3;
+import org.mirage.gfbs.auralis.api.processing.AudioProcessor;
 
 public interface AuralisSoundInstance {
     static void bind(AuralisSoundInstance instance) {
@@ -37,6 +38,13 @@ public interface AuralisSoundInstance {
     void stop();
     boolean isPlaying();
     boolean isPaused();
+
+    /**
+     * 添加一个音频处理器
+     * @param processor 处理器实例
+     * @return this
+     */
+    AuralisSoundInstance addProcessor(AudioProcessor processor);
 
     boolean isBound();
 

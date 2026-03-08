@@ -129,13 +129,19 @@ public final class AuralisAL implements AutoCloseable {
          */
         public final boolean strictChecks;
 
+        public final boolean destroyContextOnShutdown;
+
+        public final boolean closeDeviceOnShutdown;
+
         public Config(
                 String deviceName,
                 String threadName,
                 boolean daemonThread,
                 int[] contextAttributes,
                 long idleWaitMillis,
-                boolean strictChecks
+                boolean strictChecks,
+                boolean destroyContextOnShutdown,
+                boolean closeDeviceOnShutdown
         ) {
             this.deviceName = deviceName;
             this.threadName = Objects.requireNonNullElse(threadName, "Auralis-OpenAL");
@@ -143,6 +149,8 @@ public final class AuralisAL implements AutoCloseable {
             this.contextAttributes = contextAttributes;
             this.idleWaitMillis = Math.max(0L, idleWaitMillis);
             this.strictChecks = strictChecks;
+            this.destroyContextOnShutdown = destroyContextOnShutdown;
+            this.closeDeviceOnShutdown = closeDeviceOnShutdown;
         }
 
         public static Config defaults() {
@@ -152,6 +160,8 @@ public final class AuralisAL implements AutoCloseable {
                     true,
                     null,
                     0L,
+                    false,
+                    false,
                     false
             );
         }
@@ -167,6 +177,8 @@ public final class AuralisAL implements AutoCloseable {
                     true,
                     attrs,
                     0L,
+                    true,
+                    false,
                     false
             );
         }
@@ -384,7 +396,7 @@ public final class AuralisAL implements AutoCloseable {
                 }
                 if (task != null) {
                     task.run();
-                    if (config.strictChecks) alCheck("after task");
+                    if (config.strictChecks && !stopping.get()) alCheck("after task");
                 }
             }
             GFBsAuralis.LOGGER.info("OpenAL thread stopping: {}", config.threadName);
@@ -474,9 +486,9 @@ public final class AuralisAL implements AutoCloseable {
 
         this.alCaps = AL.createCapabilities(this.alcCaps);
 
-        AL11.alDistanceModel(AL11.AL_INVERSE_DISTANCE_CLAMPED);
+        AL10.alDistanceModel(AL10.AL_INVERSE_DISTANCE_CLAMPED);
 
-        AL11.alDopplerFactor(1.0f);
+        AL10.alDopplerFactor(1.0f);
         AL11.alSpeedOfSound(343.3f);
 
         alGetError();
@@ -503,12 +515,21 @@ public final class AuralisAL implements AutoCloseable {
 
         long ctx = this.contextHandle;
         if (ctx != 0L) {
-            alcDestroyContext(ctx);
+            if (config.destroyContextOnShutdown) {
+                alcDestroyContext(ctx);
+            }
             this.contextHandle = 0L;
         }
 
+        // Do NOT close the device if we are sharing the default device with Minecraft.
+        // OpenAL Soft may return the same device handle for multiple alcOpenDevice calls.
+        // If we close it, Minecraft's sound system will crash during its shutdown because
+        // its device handle becomes invalid.
+        // Since we are shutting down anyway, the OS will reclaim the device resources.
         if (dev != 0L) {
-            alcCloseDevice(dev);
+            if (config.closeDeviceOnShutdown) {
+                alcCloseDevice(dev);
+            }
             this.deviceHandle = 0L;
         }
 
@@ -575,12 +596,12 @@ public final class AuralisAL implements AutoCloseable {
 
     private static String getALErrorString(int errorCode) {
         switch (errorCode) {
-            case AL11.AL_NO_ERROR: return "AL_NO_ERROR (没有错误)";
-            case AL11.AL_INVALID_NAME: return "AL_INVALID_NAME (无效的名称)";
-            case AL11.AL_INVALID_ENUM: return "AL_INVALID_ENUM (无效的枚举值)";
-            case AL11.AL_INVALID_VALUE: return "AL_INVALID_VALUE (无效的参数值)";
-            case AL11.AL_INVALID_OPERATION: return "AL_INVALID_OPERATION (无效的操作)";
-            case AL11.AL_OUT_OF_MEMORY: return "AL_OUT_OF_MEMORY (内存不足)";
+            case AL_NO_ERROR: return "AL_NO_ERROR (没有错误)";
+            case AL_INVALID_NAME: return "AL_INVALID_NAME (无效的名称)";
+            case AL_INVALID_ENUM: return "AL_INVALID_ENUM (无效的枚举值)";
+            case AL_INVALID_VALUE: return "AL_INVALID_VALUE (无效的参数值)";
+            case AL_INVALID_OPERATION: return "AL_INVALID_OPERATION (无效的操作)";
+            case AL_OUT_OF_MEMORY: return "AL_OUT_OF_MEMORY (内存不足)";
             default: return "未知错误: 0x" + Integer.toHexString(errorCode);
         }
     }

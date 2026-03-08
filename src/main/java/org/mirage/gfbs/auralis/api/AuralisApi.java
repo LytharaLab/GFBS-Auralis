@@ -24,6 +24,8 @@ package org.mirage.gfbs.auralis.api;
 import net.minecraft.sounds.SoundEvent;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.concurrent.CompletableFuture;
+
 public final class AuralisApi {
     private static volatile @Nullable IAuralisEngine ENGINE;
 
@@ -64,7 +66,21 @@ public final class AuralisApi {
         return engine().createStreamed(soundEvent);
     }
 
-    private static class ServerPlaceholderSoundInstance implements AuralisSoundInstance {
+    public static CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent) {
+        if (ENGINE == null) {
+            return CompletableFuture.completedFuture(new ServerPlaceholderSoundInstance());
+        }
+        return engine().createAsync(soundEvent);
+    }
+
+    public static CompletableFuture<AuralisSoundInstance> createStreamedAsync(SoundEvent soundEvent) {
+        if (ENGINE == null) {
+            return CompletableFuture.completedFuture(new ServerPlaceholderSoundInstance());
+        }
+        return engine().createStreamedAsync(soundEvent);
+    }
+
+    static class ServerPlaceholderSoundInstance implements AuralisSoundInstance {
         @Override public void play() {}
         @Override public void pause() {}
         @Override public void stop() {}
@@ -91,5 +107,6 @@ public final class AuralisApi {
         @Override public int getPriority() { return 50; }
         @Override public AuralisSoundInstance addListener(AuralisSoundListener listener) { return this; }
         @Override public AuralisSoundInstance removeListener(AuralisSoundListener listener) { return this; }
+        @Override public AuralisSoundInstance addProcessor(org.mirage.gfbs.auralis.api.processing.AudioProcessor processor) { return this; }
     }
 }

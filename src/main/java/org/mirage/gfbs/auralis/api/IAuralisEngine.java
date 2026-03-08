@@ -23,9 +23,14 @@ package org.mirage.gfbs.auralis.api;
  */
 import net.minecraft.sounds.SoundEvent;
 
+import java.util.concurrent.CompletableFuture;
+
 public interface IAuralisEngine {
     AuralisSoundInstance create(SoundEvent soundEvent);
     AuralisSoundInstance createStreamed(SoundEvent soundEvent);
+
+    CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent);
+    CompletableFuture<AuralisSoundInstance> createStreamedAsync(SoundEvent soundEvent);
 
     void bind(AuralisSoundInstance instance);
     void unbind(AuralisSoundInstance instance);
