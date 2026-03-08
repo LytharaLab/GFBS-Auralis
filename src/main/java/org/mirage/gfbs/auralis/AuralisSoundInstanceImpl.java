@@ -1,39 +1,22 @@
 package org.mirage.gfbs.auralis;
-/**
- * G.F.B.S.-Auralis (gfbs_auralis) - A Minecraft Mod
- * Copyright (C) 2025-2029 Mirage-MC
- * <p>
- * This program is licensed under the MIT License.
- * <p>
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the Software
- * is provided to do so, subject to the following conditions:
- * <p>
- * The above copyright notice and this permission notice shall be included in all copies
- * or substantial portions of the Software.
- * <p>
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
- * PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
- * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
-import org.lwjgl.openal.AL11;
+import org.lwjgl.openal.AL10;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
 import org.mirage.gfbs.auralis.api.AuralisSoundEvent;
 import org.mirage.gfbs.auralis.api.AuralisSoundInstance;
 import org.mirage.gfbs.auralis.api.AuralisSoundListener;
+import org.mirage.gfbs.auralis.api.processing.AudioProcessor;
+import org.mirage.gfbs.auralis.utils.OggVorbisDecoder;
 
+import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,8 +24,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private final AuralisAL al;
 
-    private final int alBuffer;
-    private final List<Integer> alStreamedBuffers;
+    private final int alBuffer; // For static sounds
+    
+    // For streamed sounds
+    private final OggVorbisDecoder.StreamDecoder streamDecoder;
+    private final int[] streamingBuffers;
+    private final ByteBuffer decodeBuffer;
+
     private final SoundBufferCache bufferCache;
     private final OpenALSourcePool sourcePool;
 
@@ -53,7 +41,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     private volatile boolean isStatic = false;
     private volatile boolean looping = false;
-    private volatile boolean isStreamed = false;
+    private final boolean isStreamed;
 
     private volatile Vec3 position = Vec3.ZERO;
 
@@ -64,26 +52,33 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private final AtomicBoolean paused = new AtomicBoolean(false);
     private volatile int priority = 50;
     private final Set<AuralisSoundListener> listeners = new CopyOnWriteArraySet<>();
-    private final AtomicInteger bufferIndex = new AtomicInteger(0);
+    private final List<AudioProcessor> processorChain = new CopyOnWriteArrayList<>();
+    
     private final AtomicBoolean pendingBind = new AtomicBoolean(false);
     private final AtomicBoolean pendingPlay = new AtomicBoolean(false);
     private final AtomicBoolean startedPlayback = new AtomicBoolean(false);
     private final AtomicBoolean pendingNaturalDispose = new AtomicBoolean(false);
     private final AtomicBoolean pendingEngineRemoval = new AtomicBoolean(false);
 
+    // Static constructor
     AuralisSoundInstanceImpl(AuralisAL al, int alBuffer, SoundBufferCache bufferCache, OpenALSourcePool sourcePool) {
         this.al = Objects.requireNonNull(al, "al");
         this.alBuffer = alBuffer;
-        this.alStreamedBuffers = new ArrayList<>();
+        this.streamDecoder = null;
+        this.streamingBuffers = null;
+        this.decodeBuffer = null;
         this.bufferCache = Objects.requireNonNull(bufferCache, "bufferCache");
         this.sourcePool = Objects.requireNonNull(sourcePool, "sourcePool");
         this.isStreamed = false;
     }
 
-    AuralisSoundInstanceImpl(AuralisAL al, List<Integer> alStreamedBuffers, SoundBufferCache bufferCache, OpenALSourcePool sourcePool) {
+    // Streamed constructor
+    AuralisSoundInstanceImpl(AuralisAL al, OggVorbisDecoder.StreamDecoder streamDecoder, int[] streamingBuffers, int chunkSize, SoundBufferCache bufferCache, OpenALSourcePool sourcePool) {
         this.al = Objects.requireNonNull(al, "al");
         this.alBuffer = -1;
-        this.alStreamedBuffers = Objects.requireNonNull(alStreamedBuffers, "alStreamedBuffers");
+        this.streamDecoder = Objects.requireNonNull(streamDecoder, "streamDecoder");
+        this.streamingBuffers = Objects.requireNonNull(streamingBuffers, "streamingBuffers");
+        this.decodeBuffer = MemoryUtil.memAlloc(chunkSize);
         this.bufferCache = Objects.requireNonNull(bufferCache, "bufferCache");
         this.sourcePool = Objects.requireNonNull(sourcePool, "sourcePool");
         this.isStreamed = true;
@@ -97,9 +92,9 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     void bind() {
         if (source != null) return;
         if (!isStreamed && alBuffer == -1) return;
-        if (isStreamed && alStreamedBuffers.isEmpty()) return;
+        if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
 
-        OpenALSourcePool.SourceHandle h = sourcePool.acquire();
+        OpenALSourcePool.SourceHandle h = sourcePool.acquire(this);
         if (h == null) {
             pendingBind.set(true);
             return;
@@ -108,40 +103,39 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         pendingBind.set(false);
         final int sourceId = h.sourceId();
 
-        sourcePool.sourceToInstance.put(h, this);
-
         al.submit(() -> {
             if (source != null && source.sourceId() == sourceId) {
-                AL11.alGetError();
+                AL10.alGetError();
 
-                int state = AL11.alGetSourcei(sourceId, AL11.AL_SOURCE_STATE);
-                if (state == AL11.AL_PLAYING || state == AL11.AL_PAUSED) {
-                    AL11.alSourceStop(sourceId);
+                int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
+                if (state == AL10.AL_PLAYING || state == AL10.AL_PAUSED) {
+                    AL10.alSourceStop(sourceId);
                 }
 
-                int queued = AL11.alGetSourcei(sourceId, AL11.AL_BUFFERS_QUEUED);
+                int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
                 if (queued > 0) {
                     try (MemoryStack stack = MemoryStack.stackPush()) {
                         IntBuffer tmp = stack.mallocInt(queued);
-                        AL11.alSourceUnqueueBuffers(sourceId, tmp);
+                        AL10.alSourceUnqueueBuffers(sourceId, tmp);
                     } catch (Throwable ignored) {}
                 }
 
-                AL11.alSourcei(sourceId, AL11.AL_BUFFER, 0);
-                AL11.alSourceRewind(sourceId);
+                AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
+                AL10.alSourceRewind(sourceId);
 
                 if (isStreamed) {
-                    AL11.alSourcei(sourceId, AL11.AL_LOOPING, looping ? AL11.AL_TRUE : AL11.AL_FALSE);
+                    // For streaming, we manage looping manually by seeking the decoder
+                    AL10.alSourcei(sourceId, AL10.AL_LOOPING, AL10.AL_FALSE);
                     queueInitialBuffers(sourceId);
                 } else {
-                    AL11.alSourcei(sourceId, AL11.AL_BUFFER, alBuffer);
-                    AL11.alSourcei(sourceId, AL11.AL_LOOPING, looping ? AL11.AL_TRUE : AL11.AL_FALSE);
+                    AL10.alSourcei(sourceId, AL10.AL_BUFFER, alBuffer);
+                    AL10.alSourcei(sourceId, AL10.AL_LOOPING, looping ? AL10.AL_TRUE : AL10.AL_FALSE);
                 }
 
                 applyAllParams(sourceId);
-                AL11.alSource3f(sourceId, AL11.AL_VELOCITY, 0f, 0f, 0f);
+                AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0f, 0f, 0f);
 
-                AL11.alSourceRewind(sourceId);
+                AL10.alSourceRewind(sourceId);
             }
         });
 
@@ -157,14 +151,14 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         al.executeBlocking(() -> {
             try {
-                AL11.alSourceStop(sourceId);
-                AL11.alSourcei(sourceId, AL11.AL_BUFFER, 0);
+                AL10.alSourceStop(sourceId);
+                AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
                 
-                int queued = AL11.alGetSourcei(sourceId, AL11.AL_BUFFERS_QUEUED);
+                int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
                 if (queued > 0) {
                     try (MemoryStack stack = MemoryStack.stackPush()) {
                         IntBuffer tmp = stack.mallocInt(queued);
-                        AL11.alSourceUnqueueBuffers(sourceId, tmp);
+                        AL10.alSourceUnqueueBuffers(sourceId, tmp);
                     } catch (Throwable ignored) {}
                 }
             } catch (Exception ignored) {}
@@ -172,7 +166,6 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         this.source = null;
         paused.set(false);
-        bufferIndex.set(0);
         sourcePool.release(h);
         pendingBind.set(false);
         pendingPlay.set(false);
@@ -184,7 +177,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     @Override
     public void play() {
         if (!isStreamed && alBuffer == -1) return;
-        if (isStreamed && alStreamedBuffers.isEmpty()) return;
+        if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
 
         OpenALSourcePool.SourceHandle h = source;
         if (h == null) {
@@ -200,31 +193,34 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         al.submit(() -> {
             if (source != null && source.sourceId() == sourceId) {
                 applyAllParams(sourceId);
-                AL11.alSource3f(sourceId, AL11.AL_VELOCITY, 0f, 0f, 0f);
+                AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0f, 0f, 0f);
 
                 if (isStreamed) {
-                    int processed = AL11.alGetSourcei(sourceId, AL11.AL_BUFFERS_PROCESSED);
+                    int processed = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED);
                     if (processed > 0) {
                         try (MemoryStack stack = MemoryStack.stackPush()) {
                             IntBuffer tmp = stack.mallocInt(processed);
-                            AL11.alSourceUnqueueBuffers(sourceId, tmp);
+                            AL10.alSourceUnqueueBuffers(sourceId, tmp);
                         } catch (Throwable ignored) {}
                     }
-                    bufferIndex.set(0);
+                    // Reset decoder if needed
+                    if (streamDecoder.isEof()) {
+                         streamDecoder.seekStart();
+                    }
                     queueInitialBuffers(sourceId);
                 } else {
-                    int attached = AL11.alGetSourcei(sourceId, AL11.AL_BUFFER);
+                    int attached = AL10.alGetSourcei(sourceId, AL10.AL_BUFFER);
                     if (attached != alBuffer) {
-                        int state = AL11.alGetSourcei(sourceId, AL11.AL_SOURCE_STATE);
-                        if (state == AL11.AL_PLAYING || state == AL11.AL_PAUSED) {
-                            AL11.alSourceStop(sourceId);
+                        int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
+                        if (state == AL10.AL_PLAYING || state == AL10.AL_PAUSED) {
+                            AL10.alSourceStop(sourceId);
                         }
-                        AL11.alSourcei(sourceId, AL11.AL_BUFFER, 0);
-                        AL11.alSourcei(sourceId, AL11.AL_BUFFER, alBuffer);
+                        AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
+                        AL10.alSourcei(sourceId, AL10.AL_BUFFER, alBuffer);
                     }
                 }
 
-                AL11.alSourcePlay(sourceId);
+                AL10.alSourcePlay(sourceId);
             }
         });
 
@@ -234,7 +230,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     @Override
     public void pause() {
         if (!isStreamed && alBuffer == -1) return;
-        if (isStreamed && alStreamedBuffers.isEmpty()) return;
+        if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
 
         OpenALSourcePool.SourceHandle h = source;
         if (h == null) return;
@@ -243,7 +239,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         al.submit(() -> {
             if (source != null && source.sourceId() == sourceId) {
-                AL11.alSourcePause(sourceId);
+                AL10.alSourcePause(sourceId);
             }
         });
 
@@ -253,7 +249,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     @Override
     public void stop() {
         if (!isStreamed && alBuffer == -1) return;
-        if (isStreamed && alStreamedBuffers.isEmpty()) return;
+        if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
 
         OpenALSourcePool.SourceHandle h = source;
         if (h == null) {
@@ -268,18 +264,18 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         al.submit(() -> {
             if (source != null && source.sourceId() == sourceId) {
-                AL11.alSourceStop(sourceId);
-                AL11.alSourceRewind(sourceId);
+                AL10.alSourceStop(sourceId);
+                AL10.alSourceRewind(sourceId);
                 
                 if (isStreamed) {
-                    int queued = AL11.alGetSourcei(sourceId, AL11.AL_BUFFERS_QUEUED);
+                    int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
                     if (queued > 0) {
                         try (MemoryStack stack = MemoryStack.stackPush()) {
                             IntBuffer tmp = stack.mallocInt(queued);
-                            AL11.alSourceUnqueueBuffers(sourceId, tmp);
+                            AL10.alSourceUnqueueBuffers(sourceId, tmp);
                         } catch (Throwable ignored) {}
                     }
-                    bufferIndex.set(0);
+                    streamDecoder.seekStart();
                 }
             }
         });
@@ -291,7 +287,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     public boolean isPlaying() {
         OpenALSourcePool.SourceHandle h = source;
         if (h == null) return false;
-        return al.callBlocking(() -> AL11.alGetSourcei(h.sourceId(), AL11.AL_SOURCE_STATE) == AL11.AL_PLAYING);
+        return al.callBlocking(() -> AL10.alGetSourcei(h.sourceId(), AL10.AL_SOURCE_STATE) == AL10.AL_PLAYING);
     }
 
     @Override
@@ -394,11 +390,12 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     public AuralisSoundInstance setLooping(boolean looping) {
         this.looping = looping;
         OpenALSourcePool.SourceHandle h = source;
-        if (h != null) {
+        if (h != null && !isStreamed) {
+            // For static sounds, update AL_LOOPING directly
             final int sourceId = h.sourceId();
             al.submit(() -> {
                 if (source != null && source.sourceId() == sourceId) {
-                    AL11.alSourcei(sourceId, AL11.AL_LOOPING, looping ? AL11.AL_TRUE : AL11.AL_FALSE);
+                    AL10.alSourcei(sourceId, AL10.AL_LOOPING, looping ? AL10.AL_TRUE : AL10.AL_FALSE);
                 }
             });
         }
@@ -419,6 +416,14 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     @Override
     public int getPriority() {
         return priority;
+    }
+
+    @Override
+    public AuralisSoundInstance addProcessor(AudioProcessor processor) {
+        processorChain.add(Objects.requireNonNull(processor, "processor"));
+        // Sort by priority (smaller value = higher priority)
+        processorChain.sort((p1, p2) -> Integer.compare(p1.getPriority(), p2.getPriority()));
+        return this;
     }
 
     @Override
@@ -452,21 +457,20 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
             al.executeBlocking(() -> {
                 try {
-                    AL11.alSourceStop(h.sourceId());
-                    AL11.alSourcei(h.sourceId(), AL11.AL_BUFFER, 0);
+                    AL10.alSourceStop(h.sourceId());
+                    AL10.alSourcei(h.sourceId(), AL10.AL_BUFFER, 0);
                     
-                    int queued = AL11.alGetSourcei(h.sourceId(), AL11.AL_BUFFERS_QUEUED);
+                    int queued = AL10.alGetSourcei(h.sourceId(), AL10.AL_BUFFERS_QUEUED);
                     if (queued > 0) {
                         try (MemoryStack stack = MemoryStack.stackPush()) {
                             IntBuffer tmp = stack.mallocInt(queued);
-                            AL11.alSourceUnqueueBuffers(h.sourceId(), tmp);
+                            AL10.alSourceUnqueueBuffers(h.sourceId(), tmp);
                         } catch (Throwable ignored) {}
                     }
                 } catch (Exception ignored) {}
             });
 
             paused.set(false);
-            bufferIndex.set(0);
             sourcePool.release(h);
             pendingBind.set(false);
             pendingPlay.set(false);
@@ -490,7 +494,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         al.submit(() -> {
             if (source != null && source.sourceId() == sourceId) {
                 applyAllParams(sourceId);
-                AL11.alSource3f(sourceId, AL11.AL_VELOCITY, 0f, 0f, 0f);
+                AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0f, 0f, 0f);
             }
         });
     }
@@ -499,7 +503,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         OpenALSourcePool.SourceHandle h = source;
         if (h == null) return;
         final int sourceId = h.sourceId();
-        AL11.alSource3f(sourceId, AL11.AL_VELOCITY, 0f, 0f, 0f);
+        AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0f, 0f, 0f);
     }
 
     void applyDistanceAttenuationOnALThread(Vec3 listenerPos, float attenuationExponent, float volumeSmoothing) {
@@ -512,7 +516,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         smoothedVolume = sv;
 
         if (isStatic) {
-            AL11.alSourcef(sourceId, AL11.AL_GAIN, sv);
+            AL10.alSourcef(sourceId, AL10.AL_GAIN, sv);
             return;
         }
 
@@ -538,7 +542,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         float exp = Math.max(0.0001f, attenuationExponent);
         float shaped = (factor <= 0.0f) ? 0.0f : (factor >= 1.0f ? 1.0f : (float) Math.pow(factor, exp));
-        AL11.alSourcef(sourceId, AL11.AL_GAIN, sv * shaped);
+        AL10.alSourcef(sourceId, AL10.AL_GAIN, sv * shaped);
     }
 
     void updateStreamedBuffers() {
@@ -561,77 +565,119 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     private void updateStreamedBuffersOnALThread(int sourceId) {
-        int processed = AL11.alGetSourcei(sourceId, AL11.AL_BUFFERS_PROCESSED);
+        // Unqueue processed buffers
+        int processed = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED);
         if (processed > 0) {
             try (MemoryStack stack = MemoryStack.stackPush()) {
                 IntBuffer tmp = stack.mallocInt(processed);
-                AL11.alSourceUnqueueBuffers(sourceId, tmp);
+                AL10.alSourceUnqueueBuffers(sourceId, tmp);
+                
+                // Refill and queue them back
+                for (int i = 0; i < processed; i++) {
+                    int bufferId = tmp.get(i);
+                    if (refillAndQueue(sourceId, bufferId)) {
+                        // Success
+                    } else {
+                        // EOF or error
+                    }
+                }
             } catch (Throwable ignored) {}
         }
-
-        int queued = AL11.alGetSourcei(sourceId, AL11.AL_BUFFERS_QUEUED);
-        int size = alStreamedBuffers.size();
-        while (queued < 3 && size > 0) {
-            int idx = bufferIndex.getAndIncrement();
-            int bufferId;
-            if (looping) {
-                bufferId = alStreamedBuffers.get(idx % size);
-            } else {
-                if (idx >= size) break;
-                bufferId = alStreamedBuffers.get(idx);
-            }
-            AL11.alSourceQueueBuffers(sourceId, bufferId);
-            queued++;
-        }
-
-        if (!paused.get() && queued > 0) {
-            int state = AL11.alGetSourcei(sourceId, AL11.AL_SOURCE_STATE);
-            if (state != AL11.AL_PLAYING && state != AL11.AL_PAUSED) {
-                AL11.alSourcePlay(sourceId);
+        
+        // If stopped but not supposed to be (underrun), restart
+        if (!paused.get() && startedPlayback.get()) {
+            int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
+            if (state == AL10.AL_STOPPED) {
+                // Check if we have queued buffers
+                int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
+                if (queued > 0) {
+                    AL10.alSourcePlay(sourceId);
+                }
             }
         }
     }
 
     private void applyAllParams(int sourceId) {
-        AL11.alSourcef(sourceId, AL11.AL_GAIN, volume);
+        AL10.alSourcef(sourceId, AL10.AL_GAIN, volume);
 
         float effectivePitch = clamp(pitch * speed, 0.01f, 8.0f);
-        AL11.alSourcef(sourceId, AL11.AL_PITCH, effectivePitch);
+        AL10.alSourcef(sourceId, AL10.AL_PITCH, effectivePitch);
 
         if (isStatic) {
-            AL11.alSourcei(sourceId, AL11.AL_SOURCE_RELATIVE, AL11.AL_TRUE);
-            AL11.alSource3f(sourceId, AL11.AL_POSITION, 0f, 0f, 0f);
+            AL10.alSourcei(sourceId, AL10.AL_SOURCE_RELATIVE, AL10.AL_TRUE);
+            AL10.alSource3f(sourceId, AL10.AL_POSITION, 0f, 0f, 0f);
 
-            AL11.alSourcef(sourceId, AL11.AL_ROLLOFF_FACTOR, 0f);
-            AL11.alSourcef(sourceId, AL11.AL_REFERENCE_DISTANCE, 1.0f);
-            AL11.alSourcef(sourceId, AL11.AL_MAX_DISTANCE, 1000000.0f);
+            AL10.alSourcef(sourceId, AL10.AL_ROLLOFF_FACTOR, 0f);
+            AL10.alSourcef(sourceId, AL10.AL_REFERENCE_DISTANCE, 1.0f);
+            AL10.alSourcef(sourceId, AL10.AL_MAX_DISTANCE, 1000000.0f);
         } else {
             Vec3 p = position;
-            AL11.alSourcei(sourceId, AL11.AL_SOURCE_RELATIVE, AL11.AL_FALSE);
-            AL11.alSource3f(sourceId, AL11.AL_POSITION, (float) p.x, (float) p.y, (float) p.z);
+            AL10.alSourcei(sourceId, AL10.AL_SOURCE_RELATIVE, AL10.AL_FALSE);
+            AL10.alSource3f(sourceId, AL10.AL_POSITION, (float) p.x, (float) p.y, (float) p.z);
 
-            AL11.alSourcef(sourceId, AL11.AL_ROLLOFF_FACTOR, 0f);
-            AL11.alSourcef(sourceId, AL11.AL_REFERENCE_DISTANCE, 1.0f);
-            AL11.alSourcef(sourceId, AL11.AL_MAX_DISTANCE, 1000000.0f);
+            AL10.alSourcef(sourceId, AL10.AL_ROLLOFF_FACTOR, 0f);
+            AL10.alSourcef(sourceId, AL10.AL_REFERENCE_DISTANCE, 1.0f);
+            AL10.alSourcef(sourceId, AL10.AL_MAX_DISTANCE, 1000000.0f);
         }
 
-        AL11.alSource3f(sourceId, AL11.AL_VELOCITY, 0f, 0f, 0f);
+        AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0f, 0f, 0f);
     }
 
     private void queueInitialBuffers(int sourceId) {
-        if (alStreamedBuffers.isEmpty()) return;
-        int size = alStreamedBuffers.size();
-        for (int i = 0; i < Math.min(3, size); i++) {
-            int idx = bufferIndex.getAndIncrement();
-            int bufferId;
-            if (looping) {
-                bufferId = alStreamedBuffers.get(idx % size);
-            } else {
-                if (idx >= size) break;
-                bufferId = alStreamedBuffers.get(idx);
+        if (streamingBuffers == null) return;
+        
+        // Ensure we don't queue more than available free buffers
+        // But initially all are free.
+        for (int bufferId : streamingBuffers) {
+            if (!refillAndQueue(sourceId, bufferId)) {
+                break;
             }
-            AL11.alSourceQueueBuffers(sourceId, bufferId);
         }
+    }
+    
+    private boolean refillAndQueue(int sourceId, int bufferId) {
+        if (streamDecoder == null) return false;
+        
+        decodeBuffer.clear();
+        int bytes = streamDecoder.decodeChunk(decodeBuffer);
+        
+        if (bytes <= 0) {
+            if (looping) {
+                streamDecoder.seekStart();
+                decodeBuffer.clear();
+                bytes = streamDecoder.decodeChunk(decodeBuffer);
+            }
+        }
+        
+        if (bytes > 0) {
+            decodeBuffer.flip();
+            
+            // Apply processors
+            if (!processorChain.isEmpty()) {
+                int channels = streamDecoder.getChannels();
+                int rate = streamDecoder.getSampleRate();
+                int currentBytes = decodeBuffer.limit();
+
+                for (AudioProcessor processor : processorChain) {
+                    if (processor.isEnabled()) {
+                        int pos = decodeBuffer.position();
+                        int newBytes = processor.process(decodeBuffer, channels, rate, currentBytes);
+                        
+                        decodeBuffer.position(pos); // Reset position for next processor
+                        if (newBytes != currentBytes) {
+                            decodeBuffer.limit(pos + newBytes);
+                            currentBytes = newBytes;
+                        }
+                    }
+                }
+            }
+
+            AL10.alBufferData(bufferId, streamDecoder.getAlFormat(), decodeBuffer, streamDecoder.getSampleRate());
+            AL10.alSourceQueueBuffers(sourceId, bufferId);
+            return true;
+        }
+        
+        return false;
     }
 
     boolean processPendingBindAndPlay() {
@@ -658,30 +704,51 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         if (!al.isOnALThread()) return false;
         if (!startedPlayback.get()) return false;
         if (paused.get()) return false;
-        if (looping) return false;
+        if (looping) return false; // Looping sounds don't naturally stop usually, unless decoder fail
+        
         OpenALSourcePool.SourceHandle h = source;
         if (h == null) return false;
         int sourceId = h.sourceId();
-        int state = AL11.alGetSourcei(sourceId, AL11.AL_SOURCE_STATE);
-        if (state != AL11.AL_STOPPED) return false;
+        int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
+        
+        // For streamed sounds, we must check if we are truly done (EOF)
+        // If state is STOPPED but we still have data (underrun), we shouldn't dispose.
+        if (isStreamed) {
+             if (state == AL10.AL_STOPPED && streamDecoder != null && streamDecoder.isEof()) {
+                 // Really done
+             } else if (state == AL10.AL_STOPPED) {
+                 // Underrun or just started?
+                 // If we have queued buffers, it might be an underrun that will be fixed in updateStreamedBuffers
+                 // If queued == 0 and EOF, then done.
+                 int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
+                 if (queued == 0 && streamDecoder.isEof()) {
+                     // Done
+                 } else {
+                     return false;
+                 }
+             } else {
+                 return false;
+             }
+        } else {
+            if (state != AL10.AL_STOPPED) return false;
+        }
 
         source = null;
         sourcePool.sourceToInstance.remove(h);
 
         try {
-            AL11.alSourceStop(sourceId);
-            AL11.alSourcei(sourceId, AL11.AL_BUFFER, 0);
-            int queued = AL11.alGetSourcei(sourceId, AL11.AL_BUFFERS_QUEUED);
+            AL10.alSourceStop(sourceId);
+            AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
+            int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
             if (queued > 0) {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
                     IntBuffer tmp = stack.mallocInt(queued);
-                    AL11.alSourceUnqueueBuffers(sourceId, tmp);
+                    AL10.alSourceUnqueueBuffers(sourceId, tmp);
                 } catch (Throwable ignored) {}
             }
         } catch (Throwable ignored) {}
 
         paused.set(false);
-        bufferIndex.set(0);
         pendingBind.set(false);
         pendingPlay.set(false);
         startedPlayback.set(false);
@@ -705,7 +772,17 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     void freeBuffers() {
         if (isStreamed) {
-            bufferCache.releaseStreamedBuffers(alStreamedBuffers);
+            // Close decoder and free decode buffer
+            if (streamDecoder != null) {
+                streamDecoder.close();
+            }
+            if (decodeBuffer != null) {
+                MemoryUtil.memFree(decodeBuffer);
+            }
+            // Delete OpenAL buffers
+            if (streamingBuffers != null) {
+                bufferCache.deleteBuffers(streamingBuffers);
+            }
         } else {
             bufferCache.releaseBuffer(alBuffer);
         }

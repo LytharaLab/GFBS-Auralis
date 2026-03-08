@@ -21,7 +21,7 @@ package org.mirage.gfbs.auralis.utils;
  * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-import org.lwjgl.openal.AL11;
+import org.lwjgl.openal.AL10;
 import org.lwjgl.stb.STBVorbis;
 import org.lwjgl.stb.STBVorbisInfo;
 import org.lwjgl.system.MemoryStack;
@@ -56,7 +56,8 @@ public class OggVorbisDecoder {
                 throw new IllegalStateException("stb_vorbis_open_memory failed, error=" + error.get(0));
             }
 
-            try (STBVorbisInfo info = STBVorbisInfo.malloc(stack)) {
+            STBVorbisInfo info = STBVorbisInfo.malloc(stack);
+            try {
                 STBVorbis.stb_vorbis_get_info(handle, info);
                 int inChannels = info.channels();
                 int sampleRate = info.sample_rate();
@@ -64,9 +65,9 @@ public class OggVorbisDecoder {
                     throw new IllegalStateException("Invalid OGG/Vorbis info: channels=" + inChannels + ", sampleRate=" + sampleRate);
                 }
 
-                // OpenAL AL11 only guarantees mono/stereo. For >2ch Vorbis, downmix to stereo.
+                // OpenAL AL10 only guarantees mono/stereo. For >2ch Vorbis, downmix to stereo.
                 int outChannels = (inChannels <= 1) ? 1 : 2;
-                int alFormat = (outChannels == 1) ? AL11.AL_FORMAT_MONO16 : AL11.AL_FORMAT_STEREO16;
+                int alFormat = (outChannels == 1) ? AL10.AL_FORMAT_MONO16 : AL10.AL_FORMAT_STEREO16;
 
                 // stb_vorbis_stream_length_in_samples can be 0/-1 for some edge cases.
                 int lengthInSamplesPerChannel = STBVorbis.stb_vorbis_stream_length_in_samples(handle);
@@ -211,17 +212,17 @@ public class OggVorbisDecoder {
                         throw new IllegalStateException("stb_vorbis_open_memory failed, error=" + error.get(0));
                     }
 
-                    try (STBVorbisInfo info = STBVorbisInfo.malloc(stack)) {
-                        STBVorbis.stb_vorbis_get_info(handle, info);
+                    STBVorbisInfo info = STBVorbisInfo.malloc(stack);
+                    STBVorbis.stb_vorbis_get_info(handle, info);
                         inChannels = info.channels();
                         sampleRate = info.sample_rate();
                         if (inChannels <= 0 || sampleRate <= 0) {
                             throw new IllegalStateException("Invalid OGG/Vorbis info: channels=" + inChannels + ", sampleRate=" + sampleRate);
                         }
 
-                        // AL11 safest output is mono/stereo.
+                        // AL10 safest output is mono/stereo.
                         outChannels = (inChannels <= 1) ? 1 : 2;
-                        alFormat = (outChannels == 1) ? AL11.AL_FORMAT_MONO16 : AL11.AL_FORMAT_STEREO16;
+                        alFormat = (outChannels == 1) ? AL10.AL_FORMAT_MONO16 : AL10.AL_FORMAT_STEREO16;
 
                         isOpen = true;
                         eof = false;
@@ -231,7 +232,6 @@ public class OggVorbisDecoder {
                         if (inChannels > 2) {
                             downmixTmp = new float[frames * 2];
                         }
-                    }
                 }
             } catch (Exception e) {
                 MemoryUtil.memFree(oggBuffer);
@@ -298,6 +298,14 @@ public class OggVorbisDecoder {
 
         public boolean isEof() {
             return !isOpen || eof;
+        }
+
+        public void seekStart() {
+            if (!isOpen) {
+                throw new IllegalStateException("Decoder is closed");
+            }
+            STBVorbis.stb_vorbis_seek_start(handle);
+            eof = false;
         }
 
         @Override
