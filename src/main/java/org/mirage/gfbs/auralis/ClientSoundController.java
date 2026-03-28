@@ -25,7 +25,7 @@ public final class ClientSoundController {
     private ClientSoundController() {}
 
     private static final Map<String, AuralisSoundInstance> INSTANCES = new ConcurrentHashMap<>();
-    private static final int MAX_PENDING_PLAY = 128;
+    private static final int MAX_PENDING_PLAY = 512;
     private static final ConcurrentLinkedQueue<PendingPlay> PENDING_PLAY = new ConcurrentLinkedQueue<>();
     private static final AtomicInteger PENDING_PLAY_SIZE = new AtomicInteger(0);
 

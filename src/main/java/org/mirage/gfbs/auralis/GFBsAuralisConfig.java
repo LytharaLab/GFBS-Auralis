@@ -37,7 +37,7 @@ public class GFBsAuralisConfig {
 
             maxConcurrentSounds = builder
                     .comment("Maximum number of concurrent sounds per player")
-                    .defineInRange("maxConcurrentSounds", 64, 1, 128);
+                    .defineInRange("maxConcurrentSounds", 256, 1, 1024);
 
             defaultVolume = builder
                     .comment("Default volume for sounds (0.0 to 1.0)")
@@ -69,12 +69,12 @@ public class GFBsAuralisConfig {
                     .push("audio");
 
             maxSources = builder
-                    .comment("Maximum number of OpenAL sources (higher = more simultaneous sounds)")
-                    .defineInRange("maxSources", 32, 16, 512);
+                    .comment("Maximum number of OpenAL sources (0 = auto-detect a high safe limit for this device)")
+                    .defineInRange("maxSources", 0, 0, 1024);
 
             reserveSourcesForVanilla = builder
                     .comment("Reserve some OpenAL sources for Minecraft vanilla sound engine")
-                    .defineInRange("reserveSourcesForVanilla", 16, 0, 128);
+                    .defineInRange("reserveSourcesForVanilla", 8, 0, 256);
 
             streamedChunkSize = builder
                     .comment("PCM chunk size (bytes) for streamed sounds")

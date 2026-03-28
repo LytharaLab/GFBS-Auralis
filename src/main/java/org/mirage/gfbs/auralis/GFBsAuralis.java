@@ -48,7 +48,8 @@ public class GFBsAuralis {
                 AuralisAL al = AuralisAL.createAndStartGlobal(AuralisAL.Config.defaultsWithHrtf(cfg.enableHrtf.get()));
                 int configuredMaxSources = cfg.maxSources.get();
                 int reserve = cfg.reserveSourcesForVanilla.get();
-                int effectiveMaxSources = Math.max(1, configuredMaxSources - reserve);
+                AuralisAL.SourceBudget sourceBudget = al.querySourceBudget();
+                int effectiveMaxSources = al.recommendSourcePoolLimit(configuredMaxSources, reserve);
                 AuralisEngine engine = new AuralisEngine(
                         Minecraft.getInstance(),
                         al,
@@ -59,7 +60,14 @@ public class GFBsAuralis {
                         cfg.volumeSmoothing.get().floatValue()
                 );
                 AuralisApi.setEngine(engine);
-                LOGGER.info("Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={})", effectiveMaxSources, configuredMaxSources, reserve);
+                LOGGER.info(
+                        "Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={}, deviceMonoSources={}, deviceStereoSources={})",
+                        effectiveMaxSources,
+                        configuredMaxSources,
+                        reserve,
+                        sourceBudget.monoSources(),
+                        sourceBudget.stereoSources()
+                );
             });
         });
     }
