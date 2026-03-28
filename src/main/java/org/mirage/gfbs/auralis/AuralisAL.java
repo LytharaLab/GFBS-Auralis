@@ -24,9 +24,11 @@ package org.mirage.gfbs.auralis;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.common.Mod;
 import org.lwjgl.openal.*;
+import org.lwjgl.system.MemoryStack;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.IntBuffer;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -42,6 +44,8 @@ import static org.lwjgl.openal.AL10.*;
 )
 public final class AuralisAL implements AutoCloseable {
     public static final AtomicReference<AuralisAL> GLOBAL = new AtomicReference<>(null);
+    private static final int ALC_MONO_SOURCES_ATTR = 0x1010;
+    private static final int ALC_STEREO_SOURCES_ATTR = 0x1011;
 
     private static final class AlcExt {
         static final boolean HAS_THREAD_LOCAL_CONTEXT;
@@ -181,6 +185,16 @@ public final class AuralisAL implements AutoCloseable {
                     false,
                     false
             );
+        }
+    }
+
+    public record SourceBudget(int monoSources, int stereoSources) {
+        public int totalSources() {
+            return Math.max(0, monoSources) + Math.max(0, stereoSources);
+        }
+
+        public boolean isAvailable() {
+            return monoSources >= 0 || stereoSources >= 0;
         }
     }
 
@@ -379,6 +393,60 @@ public final class AuralisAL implements AutoCloseable {
     public long contextHandle() { ensureRunning(); return contextHandle; }
     public ALCCapabilities alcCapabilities() { ensureRunning(); return alcCaps; }
     public ALCapabilities alCapabilities() { ensureRunning(); return alCaps; }
+
+    public SourceBudget querySourceBudget() {
+        ensureRunning();
+        return callBlocking(this::querySourceBudgetOnALThread);
+    }
+
+    public int recommendSourcePoolLimit(int configuredMaxSources, int reserveSourcesForVanilla) {
+        ensureRunning();
+        return callBlocking(() -> recommendSourcePoolLimitOnALThread(configuredMaxSources, reserveSourcesForVanilla));
+    }
+
+    private int recommendSourcePoolLimitOnALThread(int configuredMaxSources, int reserveSourcesForVanilla) {
+        int reserve = Math.max(0, reserveSourcesForVanilla);
+        int requestedPoolSize = configuredMaxSources > 0 ? configuredMaxSources : 160;
+        int effectivePoolSize = Math.max(1, requestedPoolSize - reserve);
+        SourceBudget budget = querySourceBudgetOnALThread();
+        if (!budget.isAvailable()) {
+            return effectivePoolSize;
+        }
+
+        int totalDeviceSources = budget.totalSources();
+        if (totalDeviceSources <= 0) {
+            return effectivePoolSize;
+        }
+
+        int safetyHeadroom = Math.max(8, Math.min(32, totalDeviceSources / 10));
+        int deviceAwareEffectiveLimit = Math.max(1, totalDeviceSources - reserve - safetyHeadroom);
+        return Math.min(effectivePoolSize, deviceAwareEffectiveLimit);
+    }
+
+    private SourceBudget querySourceBudgetOnALThread() {
+        long dev = this.deviceHandle;
+        if (dev == 0L) {
+            return new SourceBudget(-1, -1);
+        }
+        int mono = queryDeviceInt(dev, ALC_MONO_SOURCES_ATTR);
+        int stereo = queryDeviceInt(dev, ALC_STEREO_SOURCES_ATTR);
+        return new SourceBudget(mono, stereo);
+    }
+
+    private int queryDeviceInt(long device, int param) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer values = stack.mallocInt(1);
+            alcGetError(device);
+            alcGetIntegerv(device, param, values);
+            int err = alcGetError(device);
+            if (err != ALC_NO_ERROR) {
+                return -1;
+            }
+            return values.get(0);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
 
     private void threadMain() {
         GFBsAuralis.LOGGER.info("Starting OpenAL thread: {}", config.threadName);

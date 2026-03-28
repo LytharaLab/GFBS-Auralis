@@ -124,9 +124,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 AL10.alSourceRewind(sourceId);
 
                 if (isStreamed) {
-                    // For streaming, we manage looping manually by seeking the decoder
                     AL10.alSourcei(sourceId, AL10.AL_LOOPING, AL10.AL_FALSE);
-                    queueInitialBuffers(sourceId);
                 } else {
                     AL10.alSourcei(sourceId, AL10.AL_BUFFER, alBuffer);
                     AL10.alSourcei(sourceId, AL10.AL_LOOPING, looping ? AL10.AL_TRUE : AL10.AL_FALSE);
@@ -196,18 +194,26 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0f, 0f, 0f);
 
                 if (isStreamed) {
-                    int processed = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED);
-                    if (processed > 0) {
-                        try (MemoryStack stack = MemoryStack.stackPush()) {
-                            IntBuffer tmp = stack.mallocInt(processed);
-                            AL10.alSourceUnqueueBuffers(sourceId, tmp);
-                        } catch (Throwable ignored) {}
+                    int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
+                    int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
+
+                    if (queued > 0 && state != AL10.AL_PLAYING && state != AL10.AL_PAUSED) {
+                        int processed = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED);
+                        if (processed >= queued) {
+                            try (MemoryStack stack = MemoryStack.stackPush()) {
+                                IntBuffer tmp = stack.mallocInt(queued);
+                                AL10.alSourceUnqueueBuffers(sourceId, tmp);
+                            } catch (Throwable ignored) {}
+                            queued = 0;
+                        }
                     }
-                    // Reset decoder if needed
-                    if (streamDecoder.isEof()) {
-                         streamDecoder.seekStart();
+
+                    if (queued == 0) {
+                        if (streamDecoder.isEof()) {
+                            streamDecoder.seekStart();
+                        }
+                        queueInitialBuffers(sourceId);
                     }
-                    queueInitialBuffers(sourceId);
                 } else {
                     int attached = AL10.alGetSourcei(sourceId, AL10.AL_BUFFER);
                     if (attached != alBuffer) {
