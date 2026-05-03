@@ -14,6 +14,11 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.world.phys.Vec3;
 import org.mirage.gfbs.auralis.api.AuralisApi;
 import org.mirage.gfbs.auralis.api.AuralisSoundInstance;
+import org.mirage.gfbs.auralis.network.TweenControlPacket;
+import org.mirage.gfbs.auralis.tween.EasingDirection;
+import org.mirage.gfbs.auralis.tween.EasingStyle;
+import org.mirage.gfbs.auralis.tween.ForgeTweenHook;
+import org.mirage.gfbs.auralis.tween.TweenInfo;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.Map;
@@ -286,6 +291,84 @@ public final class ClientSoundController {
     public static void setMaxDistance(String id, float distance) {
         AuralisSoundInstance inst = INSTANCES.get(id);
         if (inst != null) inst.setMaxDistance(Math.max(0.01f, distance));
+    }
+
+    public static AuralisSoundInstance getInstance(String id) {
+        return INSTANCES.get(id);
+    }
+
+    public static void startTween(TweenControlPacket.Property property, String id,
+                                  double targetX, double targetY, double targetZ,
+                                  float duration,
+                                  EasingStyle easingStyle, EasingDirection easingDirection) {
+        AuralisSoundInstance inst = INSTANCES.get(id);
+        if (inst == null) {
+            GFBsAuralis.LOGGER.warn("[Auralis] Tween target sound not found: id={}", id);
+            return;
+        }
+
+        EasingStyle style = easingStyle != null ? easingStyle : EasingStyle.LINEAR;
+        EasingDirection dir = easingDirection != null ? easingDirection : EasingDirection.OUT;
+
+        TweenInfo scalarInfo = TweenInfo.of(duration)
+                .easing(style, dir)
+                .build();
+
+        switch (property) {
+            case VOLUME -> ForgeTweenHook.TWEENS.create(
+                    inst::getVolume,
+                    v -> inst.setVolume((float) v),
+                    scalarInfo,
+                    targetX
+            ).play();
+            case PITCH -> ForgeTweenHook.TWEENS.create(
+                    inst::getPitch,
+                    v -> inst.setPitch((float) v),
+                    scalarInfo,
+                    targetX
+            ).play();
+            case SPEED -> ForgeTweenHook.TWEENS.create(
+                    inst::getSpeed,
+                    v -> inst.setSpeed((float) v),
+                    scalarInfo,
+                    targetX
+            ).play();
+            case POSITION -> {
+                TweenInfo posInfo = TweenInfo.of(duration)
+                        .easing(style, dir)
+                        .build();
+                ForgeTweenHook.TWEENS.create(
+                        () -> inst.getPosition().x,
+                        v -> inst.setPosition(new Vec3(v, inst.getPosition().y, inst.getPosition().z)),
+                        posInfo,
+                        targetX
+                ).play();
+                ForgeTweenHook.TWEENS.create(
+                        () -> inst.getPosition().y,
+                        v -> inst.setPosition(new Vec3(inst.getPosition().x, v, inst.getPosition().z)),
+                        posInfo,
+                        targetY
+                ).play();
+                ForgeTweenHook.TWEENS.create(
+                        () -> inst.getPosition().z,
+                        v -> inst.setPosition(new Vec3(inst.getPosition().x, inst.getPosition().y, v)),
+                        posInfo,
+                        targetZ
+                ).play();
+            }
+            case MIN_DISTANCE -> ForgeTweenHook.TWEENS.create(
+                    inst::getMinDistance,
+                    v -> inst.setMinDistance((float) v),
+                    scalarInfo,
+                    targetX
+            ).play();
+            case MAX_DISTANCE -> ForgeTweenHook.TWEENS.create(
+                    inst::getMaxDistance,
+                    v -> inst.setMaxDistance((float) v),
+                    scalarInfo,
+                    targetX
+            ).play();
+        }
     }
 
     public static void stopAll() {

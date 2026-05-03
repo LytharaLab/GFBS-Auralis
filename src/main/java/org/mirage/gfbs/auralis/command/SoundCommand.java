@@ -7,9 +7,14 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.mojang.brigadier.builder.ArgumentBuilder;
+import com.mojang.brigadier.suggestion.SuggestionProvider;
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.ResourceArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
@@ -22,14 +27,146 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.PacketDistributor;
 import org.mirage.gfbs.auralis.network.NetworkHandler;
 import org.mirage.gfbs.auralis.network.SoundControlPacket;
+import org.mirage.gfbs.auralis.network.TweenControlPacket;
+import org.mirage.gfbs.auralis.tween.EasingDirection;
+import org.mirage.gfbs.auralis.tween.EasingStyle;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.concurrent.CompletableFuture;
 
 public final class SoundCommand {
+
+    private static final SuggestionProvider<CommandSourceStack> SUGGEST_EASING_STYLES =
+            (ctx, builder) -> SharedSuggestionProvider.suggest(
+                    java.util.Arrays.stream(EasingStyle.values()).map(Enum::name).map(String::toLowerCase),
+                    builder
+            );
+
+    private static final SuggestionProvider<CommandSourceStack> SUGGEST_EASING_DIRECTIONS =
+            (ctx, builder) -> SharedSuggestionProvider.suggest(
+                    java.util.Arrays.stream(EasingDirection.values()).map(Enum::name).map(String::toLowerCase),
+                    builder
+            );
+
     private SoundCommand() {}
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher, CommandBuildContext buildContext) {
+        ArgumentBuilder<CommandSourceStack, ?> tweenVolume = Commands.literal("volume")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f, 2.0f))
+                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.VOLUME, null))
+                                        .then(Commands.argument("easing-style", StringArgumentType.word())
+                                                .suggests(SUGGEST_EASING_STYLES)
+                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.VOLUME, null))
+                                                .then(Commands.argument("easing-direction", StringArgumentType.word())
+                                                        .suggests(SUGGEST_EASING_DIRECTIONS)
+                                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.VOLUME, null))
+                                                        .then(Commands.argument("targets", EntityArgument.players())
+                                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.VOLUME, EntityArgument.getPlayers(ctx, "targets")))
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+                );
+        ArgumentBuilder<CommandSourceStack, ?> tweenPitch = Commands.literal("pitch")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.5f, 2.0f))
+                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.PITCH, null))
+                                        .then(Commands.argument("easing-style", StringArgumentType.word())
+                                                .suggests(SUGGEST_EASING_STYLES)
+                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.PITCH, null))
+                                                .then(Commands.argument("easing-direction", StringArgumentType.word())
+                                                        .suggests(SUGGEST_EASING_DIRECTIONS)
+                                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.PITCH, null))
+                                                        .then(Commands.argument("targets", EntityArgument.players())
+                                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.PITCH, EntityArgument.getPlayers(ctx, "targets")))
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+                );
+        ArgumentBuilder<CommandSourceStack, ?> tweenSpeed = Commands.literal("speed")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.1f, 5.0f))
+                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.SPEED, null))
+                                        .then(Commands.argument("easing-style", StringArgumentType.word())
+                                                .suggests(SUGGEST_EASING_STYLES)
+                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.SPEED, null))
+                                                .then(Commands.argument("easing-direction", StringArgumentType.word())
+                                                        .suggests(SUGGEST_EASING_DIRECTIONS)
+                                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.SPEED, null))
+                                                        .then(Commands.argument("targets", EntityArgument.players())
+                                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.SPEED, EntityArgument.getPlayers(ctx, "targets")))
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+                );
+        ArgumentBuilder<CommandSourceStack, ?> tweenPosition = Commands.literal("position")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
+                                .then(Commands.argument("value", Vec3Argument.vec3())
+                                        .executes(ctx -> tweenPosition(ctx, null))
+                                        .then(Commands.argument("easing-style", StringArgumentType.word())
+                                                .suggests(SUGGEST_EASING_STYLES)
+                                                .executes(ctx -> tweenPosition(ctx, null))
+                                                .then(Commands.argument("easing-direction", StringArgumentType.word())
+                                                        .suggests(SUGGEST_EASING_DIRECTIONS)
+                                                        .executes(ctx -> tweenPosition(ctx, null))
+                                                        .then(Commands.argument("targets", EntityArgument.players())
+                                                                .executes(ctx -> tweenPosition(ctx, EntityArgument.getPlayers(ctx, "targets")))
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+                );
+        ArgumentBuilder<CommandSourceStack, ?> tweenMinDistance = Commands.literal("min-distance")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.MIN_DISTANCE, null))
+                                        .then(Commands.argument("easing-style", StringArgumentType.word())
+                                                .suggests(SUGGEST_EASING_STYLES)
+                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.MIN_DISTANCE, null))
+                                                .then(Commands.argument("easing-direction", StringArgumentType.word())
+                                                        .suggests(SUGGEST_EASING_DIRECTIONS)
+                                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.MIN_DISTANCE, null))
+                                                        .then(Commands.argument("targets", EntityArgument.players())
+                                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.MIN_DISTANCE, EntityArgument.getPlayers(ctx, "targets")))
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+                );
+        ArgumentBuilder<CommandSourceStack, ?> tweenMaxDistance = Commands.literal("max-distance")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.MAX_DISTANCE, null))
+                                        .then(Commands.argument("easing-style", StringArgumentType.word())
+                                                .suggests(SUGGEST_EASING_STYLES)
+                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.MAX_DISTANCE, null))
+                                                .then(Commands.argument("easing-direction", StringArgumentType.word())
+                                                        .suggests(SUGGEST_EASING_DIRECTIONS)
+                                                        .executes(ctx -> tween(ctx, TweenControlPacket.Property.MAX_DISTANCE, null))
+                                                        .then(Commands.argument("targets", EntityArgument.players())
+                                                                .executes(ctx -> tween(ctx, TweenControlPacket.Property.MAX_DISTANCE, EntityArgument.getPlayers(ctx, "targets")))
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+                );
+
         dispatcher.register(Commands.literal("gfbs_auralis")
                         .requires(source -> source.hasPermission(2))
 
@@ -136,7 +273,18 @@ public final class SoundCommand {
                         .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.1f, 1000.0f))
                                 .executes(ctx -> setMaxDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "max-distance"), null))
                                 .then(Commands.argument("targets", EntityArgument.players())
-                                        .executes(ctx -> setMaxDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "max-distance"), EntityArgument.getPlayers(ctx, "targets")))))))));
+                                        .executes(ctx -> setMaxDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "max-distance"), EntityArgument.getPlayers(ctx, "targets"))))))))
+
+                // /auralis tween <prop> <id> <duration> <value> [easing-style] [easing-direction] [targets]
+                .then(Commands.literal("tween")
+                        .then(tweenVolume)
+                        .then(tweenPitch)
+                        .then(tweenSpeed)
+                        .then(tweenPosition)
+                        .then(tweenMinDistance)
+                        .then(tweenMaxDistance)
+                )
+        );
     }
 
     private static int playSound(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> explicitTargets, boolean isStreamed) throws CommandSyntaxException {
@@ -492,6 +640,72 @@ public final class SoundCommand {
         return 1;
     }
 
+    private static int tween(CommandContext<CommandSourceStack> ctx, TweenControlPacket.Property property, Collection<ServerPlayer> explicitTargets) {
+        Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
+        if (targets == null) return 0;
+
+        String id = StringArgumentType.getString(ctx, "id");
+        float duration = FloatArgumentType.getFloat(ctx, "duration");
+        float value = FloatArgumentType.getFloat(ctx, "value");
+        String easingStyleStr = tryGetString(ctx, "easing-style");
+        String easingDirectionStr = tryGetString(ctx, "easing-direction");
+        EasingStyle easingStyle = parseEasingStyle(easingStyleStr);
+        EasingDirection easingDirection = parseEasingDirection(easingDirectionStr);
+
+        TweenControlPacket packet = new TweenControlPacket(
+                property, id,
+                value, 0d, 0d,
+                duration,
+                easingStyle, easingDirection
+        );
+
+        int sent = 0;
+        for (ServerPlayer p : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
+            sent++;
+        }
+
+        int finalSent = sent;
+        ctx.getSource().sendSuccess(
+                () -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家发送渐变指令 (id=" + id + ", prop=" + property.name() + ", target=" + value + ", duration=" + duration + "s)"),
+                false
+        );
+        return 1;
+    }
+
+    private static int tweenPosition(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> explicitTargets) {
+        Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
+        if (targets == null) return 0;
+
+        String id = StringArgumentType.getString(ctx, "id");
+        float duration = FloatArgumentType.getFloat(ctx, "duration");
+        Vec3 targetPos = Vec3Argument.getVec3(ctx, "value");
+        String easingStyleStr = tryGetString(ctx, "easing-style");
+        String easingDirectionStr = tryGetString(ctx, "easing-direction");
+        EasingStyle easingStyle = parseEasingStyle(easingStyleStr);
+        EasingDirection easingDirection = parseEasingDirection(easingDirectionStr);
+
+        TweenControlPacket packet = new TweenControlPacket(
+                TweenControlPacket.Property.POSITION, id,
+                targetPos.x, targetPos.y, targetPos.z,
+                duration,
+                easingStyle, easingDirection
+        );
+
+        int sent = 0;
+        for (ServerPlayer p : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
+            sent++;
+        }
+
+        int finalSent = sent;
+        ctx.getSource().sendSuccess(
+                () -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家发送位置渐变指令 (id=" + id + ", target=" + targetPos.x + "," + targetPos.y + "," + targetPos.z + ", duration=" + duration + "s)"),
+                false
+        );
+        return 1;
+    }
+
     private static Collection<ServerPlayer> resolveTargets(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> explicitTargets) {
         if (explicitTargets != null) {
             return explicitTargets;
@@ -503,6 +717,32 @@ public final class SoundCommand {
         } catch (Exception ignored) {
             ctx.getSource().sendFailure(Component.literal("[GFBS Auralis] 该命令来源不是玩家（如命令方块/控制台），必须指定 targets 参数（例如 @p/@a/玩家名）。"));
             return null;
+        }
+    }
+
+    private static String tryGetString(CommandContext<CommandSourceStack> ctx, String name) {
+        try {
+            return StringArgumentType.getString(ctx, name);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static EasingStyle parseEasingStyle(String name) {
+        if (name == null) return EasingStyle.LINEAR;
+        try {
+            return EasingStyle.valueOf(name.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return EasingStyle.LINEAR;
+        }
+    }
+
+    private static EasingDirection parseEasingDirection(String name) {
+        if (name == null) return EasingDirection.OUT;
+        try {
+            return EasingDirection.valueOf(name.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return EasingDirection.OUT;
         }
     }
 

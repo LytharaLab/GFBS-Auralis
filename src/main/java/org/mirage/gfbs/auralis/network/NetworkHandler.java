@@ -51,6 +51,9 @@ public class NetworkHandler {
 
         // New: server->client sound control for the /auralis command
         registerMessage(SoundControlPacket.class, SoundControlPacket::encode, SoundControlPacket::decode, SoundControlPacket::handle);
+
+        // New: server->client tween control for the /auralis tween command
+        registerMessage(TweenControlPacket.class, TweenControlPacket::encode, TweenControlPacket::decode, TweenControlPacket::handle);
     }
 
     private static <MSG> void registerMessage(Class<MSG> messageType,

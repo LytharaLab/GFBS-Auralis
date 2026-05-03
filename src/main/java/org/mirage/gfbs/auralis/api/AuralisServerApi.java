@@ -26,6 +26,9 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 import org.mirage.gfbs.auralis.network.NetworkHandler;
 import org.mirage.gfbs.auralis.network.SoundControlPacket;
+import org.mirage.gfbs.auralis.network.TweenControlPacket;
+import org.mirage.gfbs.auralis.tween.EasingDirection;
+import org.mirage.gfbs.auralis.tween.EasingStyle;
 import net.minecraftforge.network.PacketDistributor;
 
 import java.util.Collection;
@@ -201,6 +204,53 @@ public class AuralisServerApi {
         );
 
         return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家设置循环 (id=" + id + ", looping=" + looping + ")");
+    }
+
+    public static int tween(String id, TweenControlPacket.Property property, double value, float duration, Collection<ServerPlayer> targets) {
+        return tween(id, property, value, duration, EasingStyle.LINEAR, EasingDirection.OUT, targets);
+    }
+
+    public static int tween(String id, TweenControlPacket.Property property, double value, float duration,
+                            EasingStyle style, EasingDirection dir, Collection<ServerPlayer> targets) {
+        if (targets == null) return 0;
+
+        TweenControlPacket packet = new TweenControlPacket(
+                property, id,
+                value, 0d, 0d,
+                duration,
+                style, dir
+        );
+
+        return sendTweenPacket(packet, targets,
+                "[GFBS Auralis] 已向 %d 名玩家发送渐变指令 (id=" + id + ", prop=" + property.name() + ", target=" + value + ", duration=" + duration + "s)");
+    }
+
+    public static int tweenPosition(String id, Vec3 targetPos, float duration, Collection<ServerPlayer> targets) {
+        return tweenPosition(id, targetPos, duration, EasingStyle.LINEAR, EasingDirection.OUT, targets);
+    }
+
+    public static int tweenPosition(String id, Vec3 targetPos, float duration,
+                                    EasingStyle style, EasingDirection dir, Collection<ServerPlayer> targets) {
+        if (targets == null) return 0;
+
+        TweenControlPacket packet = new TweenControlPacket(
+                TweenControlPacket.Property.POSITION, id,
+                targetPos.x, targetPos.y, targetPos.z,
+                duration,
+                style, dir
+        );
+
+        return sendTweenPacket(packet, targets,
+                "[GFBS Auralis] 已向 %d 名玩家发送位置渐变指令 (id=" + id + ", target=" + targetPos.x + "," + targetPos.y + "," + targetPos.z + ", duration=" + duration + "s)");
+    }
+
+    private static int sendTweenPacket(TweenControlPacket packet, Collection<ServerPlayer> targets, String message) {
+        int sent = 0;
+        for (ServerPlayer p : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
+            sent++;
+        }
+        return 1;
     }
 
     private static int sendPacketToPlayers(SoundControlPacket packet, Collection<ServerPlayer> targets, String successMessage) {
