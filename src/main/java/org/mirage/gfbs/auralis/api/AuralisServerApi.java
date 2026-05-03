@@ -21,9 +21,11 @@ package org.mirage.gfbs.auralis.api;
  * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
+import org.mirage.gfbs.auralis.network.BindControlPacket;
 import org.mirage.gfbs.auralis.network.NetworkHandler;
 import org.mirage.gfbs.auralis.network.SoundControlPacket;
 import org.mirage.gfbs.auralis.network.TweenControlPacket;
@@ -242,6 +244,34 @@ public class AuralisServerApi {
 
         return sendTweenPacket(packet, targets,
                 "[GFBS Auralis] 已向 %d 名玩家发送位置渐变指令 (id=" + id + ", target=" + targetPos.x + "," + targetPos.y + "," + targetPos.z + ", duration=" + duration + "s)");
+    }
+
+    public static int bindEntity(String id, int entityId, Collection<ServerPlayer> targets) {
+        if (targets == null) return 0;
+
+        BindControlPacket packet = BindControlPacket.bindEntity(id, entityId, new java.util.UUID(0, 0));
+        return sendBindPacket(packet, targets);
+    }
+
+    public static int bindBlock(String id, BlockPos pos, Collection<ServerPlayer> targets) {
+        if (targets == null) return 0;
+
+        BindControlPacket packet = BindControlPacket.bindBlock(id, pos);
+        return sendBindPacket(packet, targets);
+    }
+
+    public static int unbind(String id, Collection<ServerPlayer> targets) {
+        if (targets == null) return 0;
+
+        BindControlPacket packet = BindControlPacket.unbind(id);
+        return sendBindPacket(packet, targets);
+    }
+
+    private static int sendBindPacket(BindControlPacket packet, Collection<ServerPlayer> targets) {
+        for (ServerPlayer p : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
+        }
+        return 1;
     }
 
     private static int sendTweenPacket(TweenControlPacket packet, Collection<ServerPlayer> targets, String message) {

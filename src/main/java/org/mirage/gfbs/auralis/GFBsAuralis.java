@@ -100,6 +100,10 @@ public class GFBsAuralis {
         public static void onClientTick(TickEvent.ClientTickEvent e) {
             if (e.phase != TickEvent.Phase.END) return;
             ClientSoundController.flushPendingIfReady();
+            var mc = Minecraft.getInstance();
+            if (mc.level != null) {
+                ClientSoundController.tickBoundPositions(mc.level, mc.level.entitiesForRendering());
+            }
             if (AuralisApi.isInitialized()) {
                 AuralisApi.engine().tick();
             }
