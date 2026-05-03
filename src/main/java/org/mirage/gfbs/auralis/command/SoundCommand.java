@@ -9,14 +9,13 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.builder.ArgumentBuilder;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
-import com.mojang.brigadier.suggestion.Suggestions;
-import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.ResourceArgument;
+import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.Registries;
@@ -25,6 +24,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.PacketDistributor;
+import org.mirage.gfbs.auralis.network.BindControlPacket;
 import org.mirage.gfbs.auralis.network.NetworkHandler;
 import org.mirage.gfbs.auralis.network.SoundControlPacket;
 import org.mirage.gfbs.auralis.network.TweenControlPacket;
@@ -33,7 +33,6 @@ import org.mirage.gfbs.auralis.tween.EasingStyle;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.concurrent.CompletableFuture;
 
 public final class SoundCommand {
 
@@ -54,8 +53,8 @@ public final class SoundCommand {
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher, CommandBuildContext buildContext) {
         ArgumentBuilder<CommandSourceStack, ?> tweenVolume = Commands.literal("volume")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
-                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f, 2.0f))
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f))
                                         .executes(ctx -> tween(ctx, TweenControlPacket.Property.VOLUME, null))
                                         .then(Commands.argument("easing-style", StringArgumentType.word())
                                                 .suggests(SUGGEST_EASING_STYLES)
@@ -73,8 +72,8 @@ public final class SoundCommand {
                 );
         ArgumentBuilder<CommandSourceStack, ?> tweenPitch = Commands.literal("pitch")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
-                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.5f, 2.0f))
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f))
                                         .executes(ctx -> tween(ctx, TweenControlPacket.Property.PITCH, null))
                                         .then(Commands.argument("easing-style", StringArgumentType.word())
                                                 .suggests(SUGGEST_EASING_STYLES)
@@ -92,8 +91,8 @@ public final class SoundCommand {
                 );
         ArgumentBuilder<CommandSourceStack, ?> tweenSpeed = Commands.literal("speed")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
-                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.1f, 5.0f))
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f))
                                         .executes(ctx -> tween(ctx, TweenControlPacket.Property.SPEED, null))
                                         .then(Commands.argument("easing-style", StringArgumentType.word())
                                                 .suggests(SUGGEST_EASING_STYLES)
@@ -111,7 +110,7 @@ public final class SoundCommand {
                 );
         ArgumentBuilder<CommandSourceStack, ?> tweenPosition = Commands.literal("position")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.0f))
                                 .then(Commands.argument("value", Vec3Argument.vec3())
                                         .executes(ctx -> tweenPosition(ctx, null))
                                         .then(Commands.argument("easing-style", StringArgumentType.word())
@@ -130,8 +129,8 @@ public final class SoundCommand {
                 );
         ArgumentBuilder<CommandSourceStack, ?> tweenMinDistance = Commands.literal("min-distance")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
-                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f))
                                         .executes(ctx -> tween(ctx, TweenControlPacket.Property.MIN_DISTANCE, null))
                                         .then(Commands.argument("easing-style", StringArgumentType.word())
                                                 .suggests(SUGGEST_EASING_STYLES)
@@ -149,8 +148,8 @@ public final class SoundCommand {
                 );
         ArgumentBuilder<CommandSourceStack, ?> tweenMaxDistance = Commands.literal("max-distance")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.05f, 3600.0f))
-                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                        .then(Commands.argument("duration", FloatArgumentType.floatArg(0.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f))
                                         .executes(ctx -> tween(ctx, TweenControlPacket.Property.MAX_DISTANCE, null))
                                         .then(Commands.argument("easing-style", StringArgumentType.word())
                                                 .suggests(SUGGEST_EASING_STYLES)
@@ -167,6 +166,33 @@ public final class SoundCommand {
                         )
                 );
 
+        ArgumentBuilder<CommandSourceStack, ?> bindEntity = Commands.literal("entity")
+                .then(Commands.argument("target_entity", EntityArgument.entity())
+                        .executes(ctx -> bindEntityCmd(ctx, null))
+                        .then(Commands.argument("targets", EntityArgument.players())
+                                .executes(ctx -> bindEntityCmd(ctx, EntityArgument.getPlayers(ctx, "targets")))
+                        )
+                );
+        ArgumentBuilder<CommandSourceStack, ?> bindBlock = Commands.literal("block")
+                .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                        .executes(ctx -> bindBlockCmd(ctx, null))
+                        .then(Commands.argument("targets", EntityArgument.players())
+                                .executes(ctx -> bindBlockCmd(ctx, EntityArgument.getPlayers(ctx, "targets")))
+                        )
+                );
+        ArgumentBuilder<CommandSourceStack, ?> bindCmd = Commands.literal("bind")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(bindEntity)
+                        .then(bindBlock)
+                );
+        ArgumentBuilder<CommandSourceStack, ?> unbindCmd = Commands.literal("unbind")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .executes(ctx -> unbindCmd(ctx, null))
+                        .then(Commands.argument("targets", EntityArgument.players())
+                                .executes(ctx -> unbindCmd(ctx, EntityArgument.getPlayers(ctx, "targets")))
+                        )
+                );
+
         dispatcher.register(Commands.literal("gfbs_auralis")
                         .requires(source -> source.hasPermission(2))
 
@@ -174,15 +200,15 @@ public final class SoundCommand {
                         .then(Commands.literal("play")
                                 .then(Commands.argument("sound", ResourceArgument.resource(buildContext, Registries.SOUND_EVENT))
                                         .then(Commands.argument("id", StringArgumentType.string())
-                                                .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f, 2.0f))
-                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.5f, 2.0f))
-                                                                .then(Commands.argument("speed", FloatArgumentType.floatArg(0.1f, 5.0f))
+                                                .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f))
+                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f))
+                                                                .then(Commands.argument("speed", FloatArgumentType.floatArg(0.0f))
                                                                         .then(Commands.argument("static", BoolArgumentType.bool())
                                                                                 .then(Commands.argument("position", Vec3Argument.vec3())
                                                                                         .then(Commands.argument("looping", BoolArgumentType.bool())
-                                                                                                .then(Commands.argument("priority", IntegerArgumentType.integer(0, 100))
-                                                                                                        .then(Commands.argument("min-distance", FloatArgumentType.floatArg(0.1f, 1000.0f))
-                                                                                                                .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                                                                                                .then(Commands.argument("priority", IntegerArgumentType.integer(0))
+                                                                                                        .then(Commands.argument("min-distance", FloatArgumentType.floatArg(0.0f))
+                                                                                                                .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.0f))
                                                                                                                         .executes(ctx -> playSound(ctx, null, false))
                                                                                                                         .then(Commands.argument("targets", EntityArgument.players())
                                                                                                                                 .executes(ctx -> playSound(ctx, EntityArgument.getPlayers(ctx, "targets"), false)))))))))))))))
@@ -191,15 +217,15 @@ public final class SoundCommand {
                         .then(Commands.literal("streamed_play")
                                 .then(Commands.argument("sound", ResourceArgument.resource(buildContext, Registries.SOUND_EVENT))
                                         .then(Commands.argument("id", StringArgumentType.string())
-                                                .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f, 2.0f))
-                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.5f, 2.0f))
-                                                                .then(Commands.argument("speed", FloatArgumentType.floatArg(0.1f, 5.0f))
+                                                .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f))
+                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f))
+                                                                .then(Commands.argument("speed", FloatArgumentType.floatArg(0.0f))
                                                                         .then(Commands.argument("static", BoolArgumentType.bool())
                                                                                 .then(Commands.argument("position", Vec3Argument.vec3())
                                                                                         .then(Commands.argument("looping", BoolArgumentType.bool())
-                                                                                                .then(Commands.argument("priority", IntegerArgumentType.integer(0, 100))
-                                                                                                        .then(Commands.argument("min-distance", FloatArgumentType.floatArg(0.1f, 1000.0f))
-                                                                                                                .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                                                                                                .then(Commands.argument("priority", IntegerArgumentType.integer(0))
+                                                                                                        .then(Commands.argument("min-distance", FloatArgumentType.floatArg(0.0f))
+                                                                                                                .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.0f))
                                                                                                                         .executes(ctx -> playSound(ctx, null, true))
                                                                                                                         .then(Commands.argument("targets", EntityArgument.players())
                                                                                                                                 .executes(ctx -> playSound(ctx, EntityArgument.getPlayers(ctx, "targets"), true)))))))))))))))
@@ -222,19 +248,19 @@ public final class SoundCommand {
                 .then(Commands.literal("regulating")
                         .then(Commands.literal("volume")
                                 .then(Commands.argument("id", StringArgumentType.string())
-                                        .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f, 2.0f))
+                                        .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f))
                                                 .executes(ctx -> setVolume(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "volume"), null))
                                                 .then(Commands.argument("targets", EntityArgument.players())
                                                         .executes(ctx -> setVolume(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "volume"), EntityArgument.getPlayers(ctx, "targets")))))))
                 .then(Commands.literal("pitch")
                         .then(Commands.argument("id", StringArgumentType.string())
-                                .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.5f, 2.0f))
+                                .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f))
                                         .executes(ctx -> setPitch(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "pitch"), null))
                                         .then(Commands.argument("targets", EntityArgument.players())
                                                 .executes(ctx -> setPitch(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "pitch"), EntityArgument.getPlayers(ctx, "targets")))))))
                         .then(Commands.literal("speed")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("speed", FloatArgumentType.floatArg(0.1f, 5.0f))
+                        .then(Commands.argument("speed", FloatArgumentType.floatArg(0.0f))
                                 .executes(ctx -> setSpeed(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "speed"), null))
                                 .then(Commands.argument("targets", EntityArgument.players())
                                         .executes(ctx -> setSpeed(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "speed"), EntityArgument.getPlayers(ctx, "targets")))))))
@@ -258,19 +284,19 @@ public final class SoundCommand {
                                         .executes(ctx -> setLooping(ctx, StringArgumentType.getString(ctx, "id"), BoolArgumentType.getBool(ctx, "looping"), EntityArgument.getPlayers(ctx, "targets")))))))
                         .then(Commands.literal("priority")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("priority", IntegerArgumentType.integer(0, 100))
+                        .then(Commands.argument("priority", IntegerArgumentType.integer(0))
                                 .executes(ctx -> setPriority(ctx, StringArgumentType.getString(ctx, "id"), IntegerArgumentType.getInteger(ctx, "priority"), null))
                                 .then(Commands.argument("targets", EntityArgument.players())
                                         .executes(ctx -> setPriority(ctx, StringArgumentType.getString(ctx, "id"), IntegerArgumentType.getInteger(ctx, "priority"), EntityArgument.getPlayers(ctx, "targets")))))))
                         .then(Commands.literal("min-distance")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("min-distance", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                        .then(Commands.argument("min-distance", FloatArgumentType.floatArg(0.0f))
                                 .executes(ctx -> setMinDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "min-distance"), null))
                                 .then(Commands.argument("targets", EntityArgument.players())
                                         .executes(ctx -> setMinDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "min-distance"), EntityArgument.getPlayers(ctx, "targets")))))))
                         .then(Commands.literal("max-distance")
                 .then(Commands.argument("id", StringArgumentType.string())
-                        .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.1f, 1000.0f))
+                        .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.0f))
                                 .executes(ctx -> setMaxDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "max-distance"), null))
                                 .then(Commands.argument("targets", EntityArgument.players())
                                         .executes(ctx -> setMaxDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "max-distance"), EntityArgument.getPlayers(ctx, "targets"))))))))
@@ -284,6 +310,8 @@ public final class SoundCommand {
                         .then(tweenMinDistance)
                         .then(tweenMaxDistance)
                 )
+                .then(bindCmd)
+                .then(unbindCmd)
         );
     }
 
@@ -744,6 +772,44 @@ public final class SoundCommand {
         } catch (IllegalArgumentException e) {
             return EasingDirection.OUT;
         }
+    }
+
+    private static int bindEntityCmd(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> explicitTargets) throws CommandSyntaxException {
+        String id = StringArgumentType.getString(ctx, "id");
+        net.minecraft.world.entity.Entity target = EntityArgument.getEntity(ctx, "target_entity");
+        Collection<ServerPlayer> targets = (explicitTargets != null) ? explicitTargets : Collections.singleton(ctx.getSource().getPlayerOrException());
+
+        BindControlPacket packet = BindControlPacket.bindEntity(id, target.getId(), target.getUUID());
+        for (ServerPlayer p : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已将音源 " + id + " 绑定到实体 " + target.getName().getString() + " (uuid=" + target.getUUID() + ")"), true);
+        return 1;
+    }
+
+    private static int bindBlockCmd(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> explicitTargets) throws CommandSyntaxException {
+        String id = StringArgumentType.getString(ctx, "id");
+        net.minecraft.core.BlockPos pos = BlockPosArgument.getLoadedBlockPos(ctx, "pos");
+        Collection<ServerPlayer> targets = (explicitTargets != null) ? explicitTargets : Collections.singleton(ctx.getSource().getPlayerOrException());
+
+        BindControlPacket packet = BindControlPacket.bindBlock(id, pos);
+        for (ServerPlayer p : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已将音源 " + id + " 绑定到方块位置 " + pos.getX() + "," + pos.getY() + "," + pos.getZ()), true);
+        return 1;
+    }
+
+    private static int unbindCmd(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> explicitTargets) throws CommandSyntaxException {
+        String id = StringArgumentType.getString(ctx, "id");
+        Collection<ServerPlayer> targets = (explicitTargets != null) ? explicitTargets : Collections.singleton(ctx.getSource().getPlayerOrException());
+
+        BindControlPacket packet = BindControlPacket.unbind(id);
+        for (ServerPlayer p : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
+        }
+        ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已解除音源 " + id + " 的绑定"), true);
+        return 1;
     }
 
     private static int unsupportedOnServer(CommandContext<CommandSourceStack> ctx, String sub) {

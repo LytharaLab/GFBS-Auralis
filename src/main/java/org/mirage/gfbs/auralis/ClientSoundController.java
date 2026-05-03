@@ -8,9 +8,11 @@ package org.mirage.gfbs.auralis;
  * network packet handlers.
  */
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.sounds.SoundEvent;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.mirage.gfbs.auralis.api.AuralisApi;
 import org.mirage.gfbs.auralis.api.AuralisSoundInstance;
@@ -20,17 +22,26 @@ import org.mirage.gfbs.auralis.tween.EasingStyle;
 import org.mirage.gfbs.auralis.tween.ForgeTweenHook;
 import org.mirage.gfbs.auralis.tween.TweenInfo;
 
+import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import javax.annotation.Nullable;
+
 public final class ClientSoundController {
     private ClientSoundController() {}
 
     private static final Map<String, AuralisSoundInstance> INSTANCES = new ConcurrentHashMap<>();
+    private static final Map<String, BindTarget> BINDINGS = new ConcurrentHashMap<>();
     private static final int MAX_PENDING_PLAY = 512;
+
+    public sealed interface BindTarget {
+        record Entity(int entityId, UUID entityUuid) implements BindTarget {}
+        record Block(BlockPos pos) implements BindTarget {}
+    }
     private static final ConcurrentLinkedQueue<PendingPlay> PENDING_PLAY = new ConcurrentLinkedQueue<>();
     private static final AtomicInteger PENDING_PLAY_SIZE = new AtomicInteger(0);
 
@@ -237,6 +248,7 @@ public final class ClientSoundController {
     }
 
     public static void stop(String id) {
+        BINDINGS.remove(id);
         AuralisSoundInstance inst = INSTANCES.remove(id);
         if (inst == null) return;
         try {
@@ -295,6 +307,59 @@ public final class ClientSoundController {
 
     public static AuralisSoundInstance getInstance(String id) {
         return INSTANCES.get(id);
+    }
+
+    public static void bindEntity(String id, int entityId, UUID entityUuid) {
+        BINDINGS.put(id, new BindTarget.Entity(entityId, entityUuid));
+    }
+
+    public static void bindBlock(String id, BlockPos pos) {
+        BINDINGS.put(id, new BindTarget.Block(pos));
+    }
+
+    public static void unbindSound(String id) {
+        BINDINGS.remove(id);
+    }
+
+    public static void tickBoundPositions(Level level) {
+        tickBoundPositions(level, null);
+    }
+
+    public static void tickBoundPositions(Level level, @Nullable Iterable<net.minecraft.world.entity.Entity> loadedEntities) {
+        var it = BINDINGS.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            String id = entry.getKey();
+            BindTarget target = entry.getValue();
+            AuralisSoundInstance inst = INSTANCES.get(id);
+            if (inst == null) {
+                continue;
+            }
+            Vec3 pos = null;
+            if (target instanceof BindTarget.Entity entityTarget) {
+                net.minecraft.world.entity.Entity e = null;
+                UUID uuid = entityTarget.entityUuid();
+                if (!uuid.equals(new UUID(0, 0)) && loadedEntities != null) {
+                    for (net.minecraft.world.entity.Entity entity : loadedEntities) {
+                        if (entity.getUUID().equals(uuid)) {
+                            e = entity;
+                            break;
+                        }
+                    }
+                }
+                if (e == null) {
+                    e = level.getEntity(entityTarget.entityId());
+                }
+                if (e != null && e.isAlive()) {
+                    pos = e.position();
+                }
+            } else if (target instanceof BindTarget.Block blockTarget) {
+                pos = Vec3.atCenterOf(blockTarget.pos());
+            }
+            if (pos != null) {
+                inst.setPosition(pos);
+            }
+        }
     }
 
     public static void startTween(TweenControlPacket.Property property, String id,
@@ -372,6 +437,7 @@ public final class ClientSoundController {
     }
 
     public static void stopAll() {
+        BINDINGS.clear();
         // Clear pending plays first
         PENDING_PLAY.clear();
         PENDING_PLAY_SIZE.set(0);
