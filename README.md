@@ -1,94 +1,223 @@
-# GFBS : Auralis
+# GFBS: Auralis
 
-**GFBS Auralis** is a Minecraft client-side audio control mod designed for advanced gameplay and content creators.  
-Built on **OpenAL**, it provides a **completely independent audio system separate from the vanilla game**, enabling more precise and controllable 3D sound playback and management.
+An instance-based spatial audio runtime for Minecraft Forge 1.20.1.
 
-This mod is suitable for scenarios that require higher‑level sound control, such as **command‑block systems, server scripts, map‑making, story‑driven performances, and sound experiments**.
+GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's vanilla sound engine. It gives mods, maps, command systems, and scripted experiences direct control over persistent sound instances, world-space positioning, streamed playback, attenuation, source priority, runtime parameter changes, and server-to-client orchestration.
 
----
+## Repository
 
-## Core Features
+- [Source code](https://github.com/LytharaLab/GFBS-Auralis)
+- [Releases](https://github.com/LytharaLab/GFBS-Auralis/releases)
+- [Issue tracker](https://github.com/LytharaLab/GFBS-Auralis/issues)
+- [Pull requests](https://github.com/LytharaLab/GFBS-Auralis/pulls)
 
-### 1. Independent Audio Engine
+## Status and compatibility
 
-* Does not use the vanilla `SoundEngine` playback pipeline  
-* Directly controls sound sources (Source / Buffer) via OpenAL  
-* Avoids limitations and conflicts of the vanilla sound system
+| Component | Version |
+| --- | --- |
+| GFBS: Auralis | `1.2.0` |
+| Minecraft | `1.20.1` |
+| Minecraft Forge | `47.4.13` |
+| Java | `17` |
+| Mod ID | `gfbs_auralis` |
 
-### 2. Accurate 3D Spatial Audio
+The OpenAL engine and all audio-device operations run on the physical client. Install the mod on the server as well when using its commands, packets, synchronized state, entity binding, or block binding.
 
-* Supports world‑coordinate sound sources (not bound to the player)  
-* Supports **min‑distance / max‑distance** attenuation model  
-  * `min‑distance`: full‑volume distance  
-  * `max‑distance`: complete silence distance  
-* Distance attenuation logic is fully controlled by the mod, not relying on OpenAL’s default model
+## Features
 
-### 3. Stable, Controllable SoundEvent Parsing
+- Independent OpenAL playback without routing custom instances through Minecraft's vanilla `SoundEngine`.
+- Persistent sound instances with play, pause, stop, looping, volume, pitch, speed, and priority controls.
+- Listener-relative sounds and world-space 3D sounds with configurable minimum and maximum distances.
+- A configurable attenuation curve and per-tick volume smoothing.
+- Static-buffer playback and chunked streamed OGG Vorbis playback.
+- Asynchronous sound creation and decoded-buffer caching.
+- An OpenAL source pool with device-aware limits, vanilla source reservation, and priority-based recycling.
+- Optional HRTF initialization when supported by the active audio device.
+- Server-to-client control through commands and the `AuralisServerApi`.
+- Runtime Tween transitions for volume, pitch, speed, position, and attenuation distances.
+- Sound instances that can follow entities or block positions.
+- Per-instance and global PCM processor hooks.
+- Plugin lifecycle, event bus, and sound-created events for extensions.
+- Client cleanup on logout, shutdown, resource release, and engine termination.
 
-* Supports vanilla `SoundEvent`  
-* Automatically avoids pitch instability caused by random SoundEvent variations  
-* The same sound‑effect ID is consistently resolved to the same concrete audio resource
+## Installation
 
-### 4. Powerful Command System (Command‑Block Compatible)
+1. Install Minecraft Forge for Minecraft `1.20.1`.
+2. Download a GFBS: Auralis JAR from [GitHub Releases](https://github.com/LytharaLab/GFBS-Auralis/releases), or build the project from source.
+3. Place the JAR in the `mods` directory of every required client.
+4. Install the same JAR on the server when server commands or synchronized control are required.
 
-* All audio operations can be performed via the `/gfbs_auralis` command  
-* Supports **player objects or player groups (@p / @a / specified players)**  
-* Fully compatible with command blocks and server consoles
+GFBS: Auralis uses registered Minecraft `SoundEvent` resources. Audio files and `sounds.json` entries remain owned by the resource pack or mod that defines them.
 
-Supported operations include:
+## Building from source
 
-* Play / Pause / Stop  
-* Real‑time adjustment of volume, pitch, speed  
-* Switch between static sounds and world sounds  
-* Dynamic position updates  
-* Set loop, priority, and distance parameters
+Clone the official repository and run:
 
-### 5. Client‑Safe Execution Model
+```bash
+git clone https://github.com/LytharaLab/GFBS-Auralis.git
+cd GFBS-Auralis
+./gradlew build
+```
 
-* All OpenAL operations **execute only on the client**  
-* The server sends “control instructions” via network packets  
-* Prevents threading errors, OpenAL state exceptions, and illegal calls
+On Windows PowerShell:
 
-### 6. Multi‑Source Concurrency & Resource Management
+```powershell
+git clone https://github.com/LytharaLab/GFBS-Auralis.git
+Set-Location GFBS-Auralis
+.\gradlew.bat build
+```
 
-* Source‑pool management  
-* Buffer caching and recycling  
-* Supports a large number of concurrently existing custom sound instances
+The built JAR is written to `build/libs/`.
 
----
+Start development environments with:
 
-## Target Audience
+```bash
+./gradlew runClient
+./gradlew runServer
+```
 
-* Map authors / Story‑map creators  
-* Advanced command‑block users  
-* Server developers  
-* Mod developers (requiring independent audio control)  
-* Experimental projects with in‑depth requirements for Minecraft’s sound system
+## Java API quick start
 
----
+Create and configure an instance from client-side code:
 
-## Design Goals
+```java
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.registries.ForgeRegistries;
+import org.mirage.gfbs.auralis.api.AuralisApi;
+import org.mirage.gfbs.auralis.api.AuralisSoundInstance;
 
-* Predictable (Deterministic)  
-* Independent of vanilla sound‑playback logic  
-* Friendly to command systems and servers  
-* Aimed at advanced “orchestrated audio” gameplay, not simply replacing vanilla sounds
+SoundEvent sound = ForgeRegistries.SOUND_EVENTS.getValue(
+        new ResourceLocation("example", "reactor_hum")
+);
 
----
+if (sound == null) {
+    throw new IllegalStateException("Missing sound event: example:reactor_hum");
+}
 
-## Notes
+AuralisSoundInstance instance = AuralisApi.create(sound)
+        .setPosition(new Vec3(128.5, 64.0, -32.5))
+        .setStatic(false)
+        .setVolume(1.0f)
+        .setPitch(1.0f)
+        .setSpeed(1.0f)
+        .setLooping(true)
+        .setPriority(80)
+        .setMinDistance(4.0f)
+        .setMaxDistance(64.0f);
 
-* This is a **client‑side mod** (the server is only responsible for commands and network synchronization)  
-* Ensure the client supports OpenAL before use (Minecraft satisfies this by default)  
-* Not recommended to use alongside mods that deeply modify the audio system (compatibility should be tested individually)
+AuralisSoundInstance.bind(instance);
+instance.play();
+```
 
----
+Stop and release the source when the owning object is removed:
+
+```java
+instance.stop();
+AuralisSoundInstance.unbind(instance);
+```
+
+Use `AuralisApi.createStreamed(...)` for chunked streamed playback. Asynchronous variants are available through `createAsync(...)` and `createStreamedAsync(...)`.
+
+`setStatic(true)` creates a listener-relative sound without world-distance attenuation. Use `setStatic(false)` with `setPosition(...)` for a positional world sound.
+
+## Command control
+
+All commands require permission level `2` and begin with `/gfbs_auralis`.
+
+Play a positional looping sound for every player:
+
+```mcfunction
+/gfbs_auralis play minecraft:block.beacon.ambient reactor_hum 1.0 1.0 1.0 false ~ ~ ~ true 80 4.0 64.0 @a
+```
+
+The play syntax is:
+
+```text
+/gfbs_auralis play <sound> <id> <volume> <pitch> <speed> <static> <position> <looping> <priority> <min-distance> <max-distance> [targets]
+```
+
+Use `streamed_play` with the same arguments for streamed playback.
+
+Runtime controls include:
+
+```text
+/gfbs_auralis pause <id> [targets]
+/gfbs_auralis stop <id> [targets]
+/gfbs_auralis regulating volume <id> <value> [targets]
+/gfbs_auralis regulating pitch <id> <value> [targets]
+/gfbs_auralis regulating speed <id> <value> [targets]
+/gfbs_auralis regulating position <id> <position> [targets]
+/gfbs_auralis regulating static <id> <value> [targets]
+/gfbs_auralis regulating looping <id> <value> [targets]
+/gfbs_auralis regulating priority <id> <value> [targets]
+/gfbs_auralis regulating min-distance <id> <value> [targets]
+/gfbs_auralis regulating max-distance <id> <value> [targets]
+```
+
+Tween controls support `volume`, `pitch`, `speed`, `position`, `min-distance`, and `max-distance`:
+
+```text
+/gfbs_auralis tween <property> <id> <duration> <value> [easing-style] [easing-direction] [targets]
+```
+
+A sound may follow an entity or block position:
+
+```text
+/gfbs_auralis bind <id> entity <entity> [targets]
+/gfbs_auralis bind <id> block <block-position> [targets]
+/gfbs_auralis unbind <id> [targets]
+```
+
+When the command source is a player, omitted `targets` default to that player. Command blocks and the server console must provide an explicit target selector.
+
+## Configuration
+
+Client audio configuration includes:
+
+- Maximum OpenAL source count, including automatic device-based selection.
+- Sources reserved for Minecraft's vanilla audio engine.
+- Streamed PCM chunk size and decoded-byte safety limit.
+- Distance attenuation exponent.
+- Volume smoothing factor.
+- Optional HRTF initialization.
+
+Server configuration includes concurrency limits, default volume, remote-sound control, and client-sync policy.
+
+Changing source limits, streaming limits, or HRTF settings may require a client restart because they affect audio-engine initialization.
+
+## Architecture
+
+```text
+src/main/java/org/mirage/gfbs/auralis/
+├── api/         Public engine, sound-instance, event, plugin, and processor APIs
+├── command/     Brigadier command registration and dispatch
+├── core/        Event bus and plugin manager implementations
+├── event/       Forge synchronization event handlers
+├── network/     Client control, binding, and Tween packets
+├── server/      Server-side sound state and synchronization
+├── tween/       Tween service, easing, and playback state
+├── utils/       OGG Vorbis decoding
+└── *.java       OpenAL engine, source pool, buffer cache, and client controller
+```
+
+The server describes intended sound state and sends bounded control messages. The client owns decoding, OpenAL sources, listener updates, attenuation, streaming queues, and audio-device calls.
+
+## Scope and compatibility
+
+GFBS: Auralis is intended for orchestrated audio systems that need independently addressable instances. It does not replace Minecraft's entire sound engine, rewrite ordinary vanilla sound playback, or provide audio assets by itself.
+
+Mods that replace or deeply intercept OpenAL, Minecraft audio initialization, or sound-resource loading may require compatibility testing. Source limits are deliberately configurable so Auralis can reserve capacity for vanilla and other audio users.
+
+## Contributing
+
+Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening an issue or pull request. Participation in the project is governed by [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 ## License
 
-This project is open‑source under the MIT License.  
-You are free to use, modify, and distribute it, subject to the terms of the license.
+GFBS: Auralis is available under the [MIT License](LICENSE).
 
----
+Copyright © 2025–2029 MirageV-MC.
 
-- This document was written by AI.
+Minecraft is a trademark of Microsoft Corporation. This project is not affiliated with or endorsed by Microsoft or Mojang Studios.
