@@ -235,15 +235,8 @@ public final class AuralisEngine implements IAuralisEngine {
     @Override
     public void unbind(AuralisSoundInstance instance) {
         AuralisSoundInstanceImpl impl = requireImpl(instance);
-        try {
-            impl.unbind();
-        } finally {
-            try {
-                impl.freeBuffers();
-            } finally {
-                instances.remove(impl);
-            }
-        }
+        instances.remove(impl);
+        impl.disposeExplicitly();
     }
 
     @Override
@@ -276,7 +269,7 @@ public final class AuralisEngine implements IAuralisEngine {
 
             for (AuralisSoundInstanceImpl inst : instances.values()) {
                 inst.updateStreamedBuffersOnALThread();
-                inst.disposeIfNaturallyStoppedOnALThread();
+                inst.handleNaturalCompletionOnALThread();
                 inst.applyVelocityZeroOnALThread();
                 inst.applyDistanceAttenuationOnALThread(listenerPos, attenuationExponent, volumeSmoothing);
             }
@@ -287,7 +280,7 @@ public final class AuralisEngine implements IAuralisEngine {
         List<AuralisSoundInstanceImpl> toRemove = new ArrayList<>();
         for (AuralisSoundInstanceImpl inst : instances.values()) {
             try {
-                if (inst.finalizeNaturalDisposeIfNeeded() || inst.consumePendingEngineRemoval()) {
+                if (inst.finalizeNaturalCompletionIfNeeded() || inst.consumePendingEngineRemoval()) {
                     toRemove.add(inst);
                 }
             } catch (Throwable ignored) {
@@ -321,6 +314,7 @@ public final class AuralisEngine implements IAuralisEngine {
         // 3. Free buffers (now safe to delete as they are detached).
         for (AuralisSoundInstanceImpl inst : instances.values()) {
             try {
+                inst.markDisposedAfterSourcePoolShutdown();
                 inst.freeBuffers();
             } catch (Throwable ignored) {
             }
@@ -336,9 +330,14 @@ public final class AuralisEngine implements IAuralisEngine {
     }
 
     private AuralisSoundInstanceImpl requireImpl(AuralisSoundInstance instance) {
-        if (instance instanceof AuralisSoundInstanceImpl impl) return impl;
+        if (instance instanceof AuralisSoundInstanceImpl impl) {
+            if (impl.isDisposed()) {
+                throw new IllegalStateException("Auralis sound instance has already been disposed: " + instance);
+            }
+            return impl;
+        }
         AuralisSoundInstanceImpl mapped = instances.get(instance);
-        if (mapped != null) return mapped;
+        if (mapped != null && !mapped.isDisposed()) return mapped;
         throw new IllegalArgumentException("Not an Auralis engine instance: " + instance);
     }
 }

@@ -72,6 +72,29 @@ public interface AuralisSoundInstance {
     AuralisSoundInstance setLooping(boolean looping);
     boolean isLooping();
 
+    /**
+     * Controls whether this instance is permanently disposed after a non-looping playback
+     * reaches its natural end. The default is {@code true} for backwards compatibility.
+     * <p>
+     * When disabled, Auralis still releases the scarce OpenAL source after playback ends,
+     * but keeps the logical instance and its audio resources alive so {@link #play()} can
+     * start it again. Call {@link #unbind(AuralisSoundInstance)} when the instance is no
+     * longer needed.
+     *
+     * @param enabled {@code true} to dispose automatically; {@code false} to retain the instance
+     * @return this instance
+     */
+    default AuralisSoundInstance setAutoDisposeOnFinish(boolean enabled) {
+        return this;
+    }
+
+    /**
+     * @return whether this instance is automatically disposed after natural playback completion
+     */
+    default boolean isAutoDisposeOnFinish() {
+        return true;
+    }
+
     AuralisSoundInstance setPriority(int priority);
 
     int getPriority();

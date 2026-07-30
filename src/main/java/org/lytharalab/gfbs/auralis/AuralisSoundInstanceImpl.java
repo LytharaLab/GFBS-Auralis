@@ -41,6 +41,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     private volatile boolean isStatic = false;
     private volatile boolean looping = false;
+    private volatile boolean autoDisposeOnFinish = true;
     private final boolean isStreamed;
 
     private volatile Vec3 position = Vec3.ZERO;
@@ -57,8 +58,10 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private final AtomicBoolean pendingBind = new AtomicBoolean(false);
     private final AtomicBoolean pendingPlay = new AtomicBoolean(false);
     private final AtomicBoolean startedPlayback = new AtomicBoolean(false);
-    private final AtomicBoolean pendingNaturalDispose = new AtomicBoolean(false);
+    private final AtomicBoolean pendingNaturalCompletion = new AtomicBoolean(false);
     private final AtomicBoolean pendingEngineRemoval = new AtomicBoolean(false);
+    private final AtomicBoolean resourcesFreed = new AtomicBoolean(false);
+    private final AtomicBoolean disposed = new AtomicBoolean(false);
 
     // Static constructor
     AuralisSoundInstanceImpl(AuralisAL al, int alBuffer, SoundBufferCache bufferCache, OpenALSourcePool sourcePool) {
@@ -90,6 +93,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     void bind() {
+        if (disposed.get() || resourcesFreed.get()) return;
         if (source != null) return;
         if (!isStreamed && alBuffer == -1) return;
         if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
@@ -174,6 +178,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     @Override
     public void play() {
+        if (disposed.get() || resourcesFreed.get()) return;
         if (!isStreamed && alBuffer == -1) return;
         if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
 
@@ -235,6 +240,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     @Override
     public void pause() {
+        if (disposed.get() || resourcesFreed.get()) return;
         if (!isStreamed && alBuffer == -1) return;
         if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
 
@@ -254,6 +260,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     @Override
     public void stop() {
+        if (disposed.get() || resourcesFreed.get()) return;
         if (!isStreamed && alBuffer == -1) return;
         if (isStreamed && (streamDecoder == null || streamingBuffers == null)) return;
 
@@ -414,6 +421,17 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     @Override
+    public AuralisSoundInstance setAutoDisposeOnFinish(boolean enabled) {
+        this.autoDisposeOnFinish = enabled;
+        return this;
+    }
+
+    @Override
+    public boolean isAutoDisposeOnFinish() {
+        return autoDisposeOnFinish;
+    }
+
+    @Override
     public AuralisSoundInstance setPriority(int priority) {
         this.priority = clamp(priority, 0, 100);
         return this;
@@ -455,17 +473,20 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     void forceStopAndFree() {
+        if (!disposed.compareAndSet(false, true)) return;
+        pendingNaturalCompletion.set(false);
+
         OpenALSourcePool.SourceHandle h = this.source;
         if (h != null) {
             this.source = null;
 
-            ((OpenALSourcePool) sourcePool).sourceToInstance.remove(h);
+            sourcePool.sourceToInstance.remove(h);
 
             al.executeBlocking(() -> {
                 try {
                     AL10.alSourceStop(h.sourceId());
                     AL10.alSourcei(h.sourceId(), AL10.AL_BUFFER, 0);
-                    
+
                     int queued = AL10.alGetSourcei(h.sourceId(), AL10.AL_BUFFERS_QUEUED);
                     if (queued > 0) {
                         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -706,37 +727,31 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         return false;
     }
 
-    boolean disposeIfNaturallyStoppedOnALThread() {
+    boolean handleNaturalCompletionOnALThread() {
         if (!al.isOnALThread()) return false;
+        if (disposed.get() || resourcesFreed.get()) return false;
         if (!startedPlayback.get()) return false;
         if (paused.get()) return false;
-        if (looping) return false; // Looping sounds don't naturally stop usually, unless decoder fail
-        
+        if (looping) return false;
+
         OpenALSourcePool.SourceHandle h = source;
         if (h == null) return false;
         int sourceId = h.sourceId();
         int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
-        
-        // For streamed sounds, we must check if we are truly done (EOF)
-        // If state is STOPPED but we still have data (underrun), we shouldn't dispose.
+
+        // A stopped streamed source can also be an underrun. Only treat it as a natural
+        // completion once the decoder reached EOF and no queued audio remains playable.
         if (isStreamed) {
-             if (state == AL10.AL_STOPPED && streamDecoder != null && streamDecoder.isEof()) {
-                 // Really done
-             } else if (state == AL10.AL_STOPPED) {
-                 // Underrun or just started?
-                 // If we have queued buffers, it might be an underrun that will be fixed in updateStreamedBuffers
-                 // If queued == 0 and EOF, then done.
-                 int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
-                 if (queued == 0 && streamDecoder.isEof()) {
-                     // Done
-                 } else {
-                     return false;
-                 }
-             } else {
-                 return false;
-             }
-        } else {
-            if (state != AL10.AL_STOPPED) return false;
+            if (state != AL10.AL_STOPPED || streamDecoder == null || !streamDecoder.isEof()) {
+                return false;
+            }
+            int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
+            int processed = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED);
+            if (queued > processed) {
+                return false;
+            }
+        } else if (state != AL10.AL_STOPPED) {
+            return false;
         }
 
         source = null;
@@ -744,7 +759,6 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         try {
             AL10.alSourceStop(sourceId);
-            AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
             int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
             if (queued > 0) {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -752,21 +766,29 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                     AL10.alSourceUnqueueBuffers(sourceId, tmp);
                 } catch (Throwable ignored) {}
             }
+            AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
+            AL10.alSourceRewind(sourceId);
         } catch (Throwable ignored) {}
 
         paused.set(false);
         pendingBind.set(false);
         pendingPlay.set(false);
         startedPlayback.set(false);
-        pendingNaturalDispose.set(true);
+        pendingNaturalCompletion.set(true);
         sourcePool.release(h);
         return true;
     }
 
-    boolean finalizeNaturalDisposeIfNeeded() {
-        if (!pendingNaturalDispose.compareAndSet(true, false)) return false;
+    boolean finalizeNaturalCompletionIfNeeded() {
+        if (!pendingNaturalCompletion.compareAndSet(true, false)) return false;
         fireEvent(AuralisSoundEvent.STOP);
         fireEvent(AuralisSoundEvent.UNBIND);
+
+        if (!autoDisposeOnFinish) {
+            return false;
+        }
+
+        disposed.set(true);
         freeBuffers();
         pendingEngineRemoval.set(true);
         return true;
@@ -776,20 +798,46 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         return pendingEngineRemoval.compareAndSet(true, false);
     }
 
+    boolean isDisposed() {
+        return disposed.get() || resourcesFreed.get();
+    }
+
+    void disposeExplicitly() {
+        if (!disposed.compareAndSet(false, true)) return;
+
+        boolean completedNaturally = pendingNaturalCompletion.getAndSet(false);
+        unbind();
+        if (completedNaturally) {
+            fireEvent(AuralisSoundEvent.STOP);
+            fireEvent(AuralisSoundEvent.UNBIND);
+        }
+        freeBuffers();
+        pendingEngineRemoval.set(false);
+    }
+
+    void markDisposedAfterSourcePoolShutdown() {
+        disposed.set(true);
+        pendingNaturalCompletion.set(false);
+        pendingBind.set(false);
+        pendingPlay.set(false);
+        startedPlayback.set(false);
+        source = null;
+    }
+
     void freeBuffers() {
+        if (!resourcesFreed.compareAndSet(false, true)) return;
+
         if (isStreamed) {
-            // Close decoder and free decode buffer
             if (streamDecoder != null) {
                 streamDecoder.close();
             }
             if (decodeBuffer != null) {
                 MemoryUtil.memFree(decodeBuffer);
             }
-            // Delete OpenAL buffers
             if (streamingBuffers != null) {
                 bufferCache.deleteBuffers(streamingBuffers);
             }
-        } else {
+        } else if (alBuffer != -1) {
             bufferCache.releaseBuffer(alBuffer);
         }
     }
