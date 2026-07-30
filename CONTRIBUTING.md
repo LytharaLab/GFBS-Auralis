@@ -1,240 +1,224 @@
 # Contributing to GFBS: Auralis
 
-Thank you for your interest in contributing to GFBS: Auralis! We appreciate your time and effort to help improve this project.
+Thank you for considering a contribution to GFBS: Auralis. This guide covers bug reports, feature proposals, code changes, documentation, audio-engine testing, and extension APIs for the [official repository](https://github.com/LytharaLab/GFBS-Auralis).
 
-## Table of Contents
+By participating, you agree to follow the project [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
-- [Code of Conduct](#code-of-conduct)
-- [About the Project](#about-the-project)
-- [Getting Started](#getting-started)
-- [Development Setup](#development-setup)
-- [How to Contribute](#how-to-contribute)
-- [Pull Request Guidelines](#pull-request-guidelines)
-- [Coding Standards](#coding-standards)
-- [Commit Message Guidelines](#commit-message-guidelines)
+## Before you begin
 
-## Code of Conduct
+- Search the [existing issues](https://github.com/LytharaLab/GFBS-Auralis/issues) and [pull requests](https://github.com/LytharaLab/GFBS-Auralis/pulls) before opening a duplicate.
+- Keep each issue and pull request focused on one defect, feature, or coherent refactor.
+- Discuss protocol changes, public API breaks, OpenAL lifecycle changes, new decoder formats, source-pool redesigns, and large command changes before implementing them.
+- Do not publish credentials, access tokens, private server addresses, personal file paths, private audio assets, or unrelated internal project material.
+- Do not attach audio, models, logs, or other assets that you do not have permission to redistribute.
+- Preserve copyright notices, source attribution, and third-party licenses when adapting external work.
 
-By participating in this project, you agree to maintain a respectful and inclusive environment. Be considerate, welcoming, and constructive in all interactions.
+## Development environment
 
-## About the Project
+The project currently targets:
 
-GFBS: Auralis is a Minecraft client-side audio control mod designed for advanced gameplay and content creators. Built on OpenAL, it provides a completely independent audio system separate from the vanilla game, enabling more precise and controllable 3D sound playback and management.
+- Minecraft `1.20.1`
+- Minecraft Forge `47.4.13`
+- Java `17`
+- Gradle through the included wrapper
 
-### Key Features
-
-- **Independent Audio Engine** - Does not use the vanilla SoundEngine playback pipeline
-- **Accurate 3D Spatial Audio** - Supports world-coordinate sound sources with min/max distance attenuation
-- **Stable SoundEvent Parsing** - Consistent resolution of sound-effect IDs to audio resources
-- **Powerful Command System** - Fully compatible with command blocks and server consoles
-- **Client-Safe Execution** - All OpenAL operations execute only on the client
-- **Multi-Source Concurrency** - Source-pool management with buffer caching
-
-### Target Audience
-
-- Map authors / Story-map creators
-- Advanced command-block users
-- Server developers
-- Mod developers requiring independent audio control
-
-## Getting Started
-
-### Prerequisites
-
-- **Java Development Kit (JDK) 17** or higher
-- **Gradle 8.x** (wrapper included)
-- **IDE** with Minecraft mod development support (IntelliJ IDEA recommended)
-- Basic knowledge of Minecraft Forge modding and OpenAL
-
-### Fork and Clone
-
-1. Fork the repository on GitHub
-2. Clone your fork locally:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/G.F.B.S.-Auralis.git
-   cd G.F.B.S.-Auralis
-   ```
-3. Add the upstream repository:
-   ```bash
-   git remote add upstream https://github.com/MirageV-MC/G.F.B.S.-Auralis.git
-   ```
-
-## Development Setup
-
-### Building the Project
+Clone the repository:
 
 ```bash
-# Windows
-.\gradlew build
+git clone https://github.com/LytharaLab/GFBS-Auralis.git
+cd GFBS-Auralis
+```
 
-# Linux/macOS
+Import it as a Gradle project in your IDE. Use the included wrapper instead of a separately installed Gradle version.
+
+Build the project:
+
+```bash
 ./gradlew build
 ```
 
-### Setting Up Your IDE
+On Windows:
 
-#### IntelliJ IDEA (Recommended)
+```powershell
+.\gradlew.bat build
+```
+
+Run the complete Gradle verification lifecycle:
 
 ```bash
-# Windows
-.\gradlew genIntellijRuns
-
-# Linux/macOS
-./gradlew genIntellijRuns
+./gradlew check
 ```
 
-After running the command, open the project in IntelliJ IDEA and refresh the Gradle project.
-
-#### Eclipse
+Start the development client or dedicated server when integration testing is required:
 
 ```bash
-# Windows
-.\gradlew genEclipseRuns
-
-# Linux/macOS
-./gradlew genEclipseRuns
+./gradlew runClient
+./gradlew runServer
 ```
 
-### Running the Game
+## Reporting bugs
+
+Open bug reports in the [issue tracker](https://github.com/LytharaLab/GFBS-Auralis/issues). A useful report should include:
+
+- The GFBS: Auralis version or commit.
+- Minecraft, Forge, Java, operating-system, and audio-device information.
+- Whether the problem occurs in single-player, an integrated server, a dedicated server, or all environments.
+- The relevant client and server configuration values.
+- A minimal list of other mods and resource packs required to reproduce the issue.
+- The affected `SoundEvent` identifier and whether playback is buffered or streamed.
+- Clear reproduction steps.
+- Expected and actual behavior.
+- Relevant logs or stack traces with private information removed.
+- A short recording when the defect is audible but not visible in logs.
+
+For source exhaustion, cut-off audio, stutter, or device failures, also include the configured source count, vanilla reserve, streaming limits, HRTF state, and approximate number of simultaneous instances.
+
+Do not report a security vulnerability in a public issue when disclosure could put users or servers at risk. Use GitHub's private vulnerability-reporting channel when available, or contact the maintainers privately.
+
+## Proposing features
+
+A feature proposal should explain:
+
+- The concrete gameplay, map-making, server, or mod-integration use case.
+- Why the current instance API, command system, or processor API cannot solve it cleanly.
+- The expected client-side and server-side behavior.
+- OpenAL, decoding, memory, threading, networking, and compatibility implications.
+- A small Java or command example when possible.
+- Whether the feature belongs in the general audio runtime or in a dependent mod.
+
+GFBS: Auralis is a general audio runtime. Project-specific music systems, cutscene logic, reactor behavior, map conventions, and content assets normally belong in the consuming project.
+
+## Code standards
+
+### Java and public API
+
+- Use Java 17 language features only.
+- Follow the existing four-space indentation and brace style.
+- Keep public names explicit, stable, and documented.
+- Avoid exposing implementation classes when a type belongs in `org.mirage.gfbs.auralis.api`.
+- Validate arguments at public API, command, packet, decoder, and audio-device boundaries.
+- Keep common initialization safe for dedicated servers. Client-only Minecraft and LWJGL classes must not be loaded from server paths.
+- Prefer bounded queues, buffers, caches, collections, and packet payloads.
+- Do not silently swallow failures that users or integrators need to diagnose.
+- Preserve source compatibility unless an approved change deliberately revises the public API.
+
+### OpenAL and threading
+
+- Execute OpenAL device, context, source, and buffer operations on the engine's OpenAL thread.
+- Do not call LWJGL OpenAL functions directly from server, network, game-tick, render, or arbitrary worker threads.
+- Keep source acquisition and release balanced on every success, failure, cancellation, logout, reload, and shutdown path.
+- Never delete a source or buffer while it may still be queued or in use.
+- Preserve Minecraft's vanilla audio capacity by respecting the configured source reserve.
+- Treat device loss, unsupported HRTF, invalid handles, pool exhaustion, and engine shutdown as normal failure cases that require controlled cleanup.
+
+### Sound instances and source pooling
+
+- Keep mutable playback state per `AuralisSoundInstance`.
+- Clamp or reject non-finite volume, pitch, speed, position, priority, and distance values.
+- Preserve the distinction between listener-relative static sounds and world-positioned sounds.
+- Maintain deterministic priority behavior when recycling sources.
+- Do not let stopped or evicted instances retain source ownership.
+- Consider replay, pause/resume, looping, late binding, logout, and natural stream completion.
+
+### Streaming and decoding
+
+- Enforce decoded-byte and chunk-size limits before allocating large buffers.
+- Keep blocking file work and decoding away from latency-sensitive game and audio-control paths when an asynchronous path is available.
+- Validate channels, sample rates, sample formats, frame counts, and decoder return values.
+- Recycle or release queued streaming buffers on completion, failure, stop, and shutdown.
+- Add tests or reproducible fixtures for truncated, malformed, empty, oversized, mono, and stereo input when changing the decoder.
+- Do not add an audio codec dependency without discussing its distribution, native-library, licensing, and platform implications.
+
+### Audio processors and plugins
+
+- `AudioProcessor.process(...)` must remain fast and bounded. Do not perform network requests, filesystem operations, long allocations, sleeps, or uncontrolled locking inside the processing callback.
+- Respect the valid region and format of the supplied PCM buffer.
+- Keep processor ordering deterministic and preserve the documented priority convention.
+- Plugin enable and disable paths must be idempotent enough to clean up partially initialized state.
+- Unregister listeners and release plugin-owned resources during shutdown.
+- Do not let one plugin failure corrupt the engine or prevent unrelated cleanup.
+
+### Networking, commands, and synchronization
+
+- Treat the server as authoritative for server-orchestrated sound commands.
+- Validate identifiers, targets, numeric ranges, positions, entity references, block positions, and packet directions.
+- Keep packets bounded and avoid sending raw audio data through the control channel.
+- OpenAL work triggered by packets must be enqueued onto the correct client thread or audio thread.
+- Consider reconnects, dimension changes, removed entities, unloaded chunks, stale bindings, missing sound events, and clients that initialize late.
+- Preserve command-block and server-console behavior: non-player command sources must provide explicit targets.
+- Document any command syntax or protocol behavior changed by a pull request.
+
+### Configuration
+
+- Provide safe defaults that work on ordinary OpenAL devices.
+- Bound every numeric configuration value.
+- Explain restart requirements for settings applied during engine initialization.
+- Keep client audio-device settings separate from server policy settings.
+- Avoid configuration changes that can starve Minecraft's vanilla sound engine by default.
+
+### Documentation
+
+- Write repository-facing documentation in clear English.
+- Document behavior that exists in the submitted code, not planned or private functionality.
+- Keep Java and command examples valid for Minecraft Forge 1.20.1.
+- Use relative links for repository files and verify that every link resolves.
+- Update `README.md` when changing installation, compatibility, commands, configuration, architecture, or public behavior.
+- Update this guide when development requirements or validation procedures change.
+
+## Testing
+
+At minimum, a pull request should pass:
 
 ```bash
-# Run client
-.\gradlew runClient
-
-# Run server
-.\gradlew runServer
+./gradlew build
+./gradlew check
 ```
 
-### Important Notes
+Manual testing is required whenever the change affects Minecraft integration or the audio device. Test the relevant cases from the following list:
 
-- This is a **client-side mod** - the server is only responsible for commands and network synchronization
-- All OpenAL operations execute only on the client side
-- Ensure the client supports OpenAL before use (Minecraft satisfies this by default)
+- Client startup and clean shutdown.
+- Integrated-server and dedicated-server class loading.
+- Buffered and streamed playback.
+- Play, pause, resume, stop, replay, looping, and natural completion.
+- Listener-relative and world-positioned sound.
+- Minimum/maximum distance and attenuation behavior.
+- Runtime volume, pitch, speed, position, looping, priority, and distance changes.
+- Tween completion and easing behavior.
+- Entity binding, block binding, unbinding, entity removal, chunk unload, and dimension change.
+- Source-pool exhaustion and priority-based recycling.
+- Logout and reconnect cleanup.
+- HRTF enabled, disabled, and unsupported-device fallback when available.
+- Commands issued by a player, command block, and server console.
+- Operation with Minecraft's vanilla sounds playing concurrently.
 
-## How to Contribute
+Include the tested environment, commands or code used, expected result, and actual result in the pull request description.
 
-### Reporting Bugs
+## Pull request process
 
-If you find a bug, please open an issue with the following information:
+1. Create a branch from the current default branch.
+2. Make a focused change with clear commits.
+3. Add or update validation, documentation, and reproducible fixtures where applicable.
+4. Run the relevant Gradle tasks and manual tests.
+5. Open a [pull request](https://github.com/LytharaLab/GFBS-Auralis/pulls) with a concise title and complete description.
+6. Explain the problem, chosen solution, compatibility impact, tests performed, and remaining limitations.
+7. Address review comments with follow-up commits unless maintainers request a different history.
 
-- **Description**: A clear description of the bug
-- **Steps to Reproduce**: Detailed steps to reproduce the behavior
-- **Expected Behavior**: What you expected to happen
-- **Actual Behavior**: What actually happened
-- **Environment**: Minecraft version, Forge version, and other relevant mods
-- **Logs**: Relevant log files or crash reports (use code blocks or paste services)
+A pull request should not contain generated build output, IDE metadata, local run directories, logs, credentials, private assets, unrelated formatting changes, or bundled third-party binaries unless the repository explicitly requires them.
 
-### Suggesting Features
+Maintainers may request changes, split an oversized pull request, or decline a contribution that conflicts with project scope, compatibility, security, attribution requirements, or maintenance capacity.
 
-We welcome feature suggestions! Please open an issue with:
+## Commit messages
 
-- **Description**: A clear description of the feature
-- **Use Case**: Why this feature would be useful
-- **Implementation Ideas**: Optional technical details if you have any
+Use short, descriptive commit messages in the imperative mood. Examples:
 
-### Submitting Code Changes
-
-1. Create a new branch from `main`:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-2. Make your changes
-3. Test your changes thoroughly in-game
-4. Commit your changes with clear messages
-5. Push to your fork:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-6. Open a Pull Request
-
-## Pull Request Guidelines
-
-- **One Feature Per PR**: Keep pull requests focused on a single feature or bug fix
-- **Descriptive Title**: Use a clear, descriptive title
-- **Description**: Explain what changes you made and why
-- **Reference Issues**: Link to any related issues
-- **Tests**: Ensure your code compiles and runs correctly in-game
-- **Documentation**: Update documentation if needed
-
-### PR Checklist
-
-- [ ] Code compiles without errors
-- [ ] Changes have been tested in-game (client-side)
-- [ ] Commit messages follow the guidelines
-- [ ] Code follows the project's coding standards
-- [ ] No unnecessary changes or formatting
-- [ ] OpenAL operations remain client-side only
-
-## Coding Standards
-
-### Java Code Style
-
-- Use **4 spaces** for indentation (no tabs)
-- Use **UTF-8** encoding
-- Follow standard Java naming conventions:
-  - `PascalCase` for classes and interfaces
-  - `camelCase` for methods and variables
-  - `UPPER_SNAKE_CASE` for constants
-- Keep methods focused and reasonably sized
-- Add Javadoc comments for public APIs
-
-### Project-Specific Guidelines
-
-- Follow the existing package structure under `org.mirage.gfbs.auralis`
-- Use appropriate logging levels via Forge's logging system
-- Ensure Mixin classes are properly annotated
-- Maintain backwards compatibility when modifying APIs
-- **Keep OpenAL operations on the client side only**
-- Server code should only send control instructions via network packets
-
-### Code Organization
-
-```
-src/main/java/org/mirage/gfbs/auralis/
-├── api/          # Public API interfaces and classes
-├── command/      # Command handlers
-├── event/        # Event handlers
-├── network/      # Network packets and handlers
-├── server/       # Server-side logic (commands & sync only)
-├── utils/        # Utility classes
-└── *.java        # Core classes (engine, sound controller, etc.)
+```text
+Fix streamed buffer cleanup after stop
+Keep OpenAL calls on the audio thread
+Validate sound binding packet positions
+Add Tween control for attenuation distance
+Document source-pool configuration
 ```
 
-## Commit Message Guidelines
+## Licensing
 
-We follow a conventional commit style:
-
-```
-<type>(<scope>): <description>
-
-[optional body]
-
-[optional footer]
-```
-
-### Types
-
-- `feat`: A new feature
-- `fix`: A bug fix
-- `docs`: Documentation changes
-- `style`: Code style changes (formatting, etc.)
-- `refactor`: Code refactoring
-- `test`: Adding or modifying tests
-- `chore`: Maintenance tasks
-
-### Examples
-
-```
-feat(api): add sound fade-in/out support
-fix(network): resolve packet desync on world change
-docs(readme): update installation instructions
-refactor(engine): optimize OpenAL source pool management
-```
-
-## License
-
-By contributing to this project, you agree that your contributions will be licensed under the [MIT License](LICENSE).
-
----
-
-Thank you for contributing to GFBS: Auralis! 🎵
+By submitting a contribution, you agree that it will be licensed under the repository's [MIT License](LICENSE).
