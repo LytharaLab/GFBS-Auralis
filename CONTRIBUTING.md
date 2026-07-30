@@ -95,7 +95,7 @@ GFBS: Auralis is a general audio runtime. Project-specific music systems, cutsce
 - Use Java 17 language features only.
 - Follow the existing four-space indentation and brace style.
 - Keep public names explicit, stable, and documented.
-- Avoid exposing implementation classes when a type belongs in `org.mirage.gfbs.auralis.api`.
+- Avoid exposing implementation classes when a type belongs in `org.lytharalab.gfbs.auralis.api`.
 - Validate arguments at public API, command, packet, decoder, and audio-device boundaries.
 - Keep common initialization safe for dedicated servers. Client-only Minecraft and LWJGL classes must not be loaded from server paths.
 - Prefer bounded queues, buffers, caches, collections, and packet payloads.
