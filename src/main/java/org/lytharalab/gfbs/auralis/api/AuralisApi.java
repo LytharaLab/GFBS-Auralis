@@ -103,6 +103,8 @@ public final class AuralisApi {
         @Override public float getMaxDistance() { return 48.0f; }
         @Override public AuralisSoundInstance setLooping(boolean looping) { return this; }
         @Override public boolean isLooping() { return false; }
+        @Override public AuralisSoundInstance setAutoDisposeOnFinish(boolean enabled) { return this; }
+        @Override public boolean isAutoDisposeOnFinish() { return true; }
         @Override public AuralisSoundInstance setPriority(int priority) { return this; }
         @Override public int getPriority() { return 50; }
         @Override public AuralisSoundInstance addListener(AuralisSoundListener listener) { return this; }

@@ -118,6 +118,28 @@ instance.stop();
 AuralisSoundInstance.unbind(instance);
 ```
 
+### Playback completion and instance lifetime
+
+Non-looping instances automatically dispose their audio resources after reaching the natural end by default. Disable that behavior when the same instance must be replayed:
+
+```java
+AuralisSoundInstance instance = AuralisApi.create(MY_SOUND)
+        .setAutoDisposeOnFinish(false);
+
+AuralisSoundInstance.bind(instance);
+instance.play();
+
+// After natural completion the OpenAL source is returned to the pool, but the
+// instance, static buffer or stream decoder remain available. This rebinds and
+// starts from the beginning.
+instance.play();
+
+// Explicitly release the retained resources when finished.
+AuralisSoundInstance.unbind(instance);
+```
+
+`setAutoDisposeOnFinish(true)` restores one-shot behavior. Source recycling is always enabled and is independent from instance disposal.
+
 Use `AuralisApi.createStreamed(...)` for chunked streamed playback. Asynchronous variants are available through `createAsync(...)` and `createStreamedAsync(...)`.
 
 `setStatic(true)` creates a listener-relative sound without world-distance attenuation. Use `setStatic(false)` with `setPosition(...)` for a positional world sound.
