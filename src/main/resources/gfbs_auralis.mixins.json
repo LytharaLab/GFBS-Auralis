@@ -1,7 +1,7 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "org.mirage.gfbs.auralis.mixin",
+  "package": "org.lytharalab.gfbs.auralis.mixin",
   "compatibilityLevel": "JAVA_8",
   "refmap": "gfbs_auralis.refmap.json",
   "mixins": [

@@ -15,7 +15,7 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 
 | Component | Version |
 | --- | --- |
-| GFBS: Auralis | `1.2.0` |
+| GFBS: Auralis | `2.0.0` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.13` |
 | Java | `17` |
@@ -85,8 +85,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.registries.ForgeRegistries;
-import org.mirage.gfbs.auralis.api.AuralisApi;
-import org.mirage.gfbs.auralis.api.AuralisSoundInstance;
+import org.lytharalab.gfbs.auralis.api.AuralisApi;
+import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
 
 SoundEvent sound = ForgeRegistries.SOUND_EVENTS.getValue(
         new ResourceLocation("example", "reactor_hum")
@@ -190,7 +190,7 @@ Changing source limits, streaming limits, or HRTF settings may require a client 
 ## Architecture
 
 ```text
-src/main/java/org/mirage/gfbs/auralis/
+src/main/java/org/lytharalab/gfbs/auralis/
 ├── api/         Public engine, sound-instance, event, plugin, and processor APIs
 ├── command/     Brigadier command registration and dispatch
 ├── core/        Event bus and plugin manager implementations
@@ -218,6 +218,6 @@ Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before open
 
 GFBS: Auralis is available under the [MIT License](LICENSE).
 
-Copyright © 2025–2029 MirageV-MC.
+Copyright © 2026 LytharaLab.
 
 Minecraft is a trademark of Microsoft Corporation. This project is not affiliated with or endorsed by Microsoft or Mojang Studios.
