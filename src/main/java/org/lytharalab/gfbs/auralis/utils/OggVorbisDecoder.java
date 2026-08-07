@@ -195,6 +195,7 @@ public class OggVorbisDecoder {
         private int alFormat;
         private boolean isOpen;
         private boolean eof;
+        private double durationSeconds;
 
         private FloatBuffer floatChunk;
         private float[] downmixTmp;
@@ -202,7 +203,9 @@ public class OggVorbisDecoder {
         private float downmixGain = 1.0f;
 
         private StreamDecoder(InputStream in) throws Exception {
-            oggBuffer = readAllToNative(in, Integer.MAX_VALUE);
+            try (InputStream ownedInput = in) {
+                oggBuffer = readAllToNative(ownedInput, Integer.MAX_VALUE);
+            }
 
             try {
                 try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -226,6 +229,15 @@ public class OggVorbisDecoder {
 
                         isOpen = true;
                         eof = false;
+                        float reportedDuration = STBVorbis.stb_vorbis_stream_length_in_seconds(handle);
+                        if (Float.isFinite(reportedDuration) && reportedDuration > 0.0f) {
+                            durationSeconds = reportedDuration;
+                        } else {
+                            int lengthSamples = STBVorbis.stb_vorbis_stream_length_in_samples(handle);
+                            durationSeconds = lengthSamples > 0
+                                    ? (lengthSamples / (double) Math.max(1, sampleRate))
+                                    : 0.0;
+                        }
 
                         int frames = STREAM_DECODE_FRAMES_PER_CHUNK;
                         floatChunk = MemoryUtil.memAllocFloat(frames * inChannels);
@@ -249,6 +261,10 @@ public class OggVorbisDecoder {
 
         public int getAlFormat() {
             return alFormat;
+        }
+
+        public double getDurationSeconds() {
+            return durationSeconds;
         }
 
         public int decodeChunk(ByteBuffer output) {
@@ -305,6 +321,22 @@ public class OggVorbisDecoder {
                 throw new IllegalStateException("Decoder is closed");
             }
             STBVorbis.stb_vorbis_seek_start(handle);
+            eof = false;
+        }
+
+        public void seekSeconds(double seconds) {
+            if (!isOpen) {
+                throw new IllegalStateException("Decoder is closed");
+            }
+            double clamped = Math.max(0.0, seconds);
+            if (durationSeconds > 0.0) {
+                clamped = Math.min(clamped, Math.max(0.0, durationSeconds - (1.0 / Math.max(1, sampleRate))));
+            }
+            long sample = Math.round(clamped * sampleRate);
+            int targetSample = (int) Math.min(Integer.MAX_VALUE, Math.max(0L, sample));
+            if (!STBVorbis.stb_vorbis_seek(handle, targetSample)) {
+                STBVorbis.stb_vorbis_seek_start(handle);
+            }
             eof = false;
         }
 

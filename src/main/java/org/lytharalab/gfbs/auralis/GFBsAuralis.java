@@ -57,16 +57,20 @@ public class GFBsAuralis {
                         cfg.streamedChunkSize.get(),
                         cfg.maxStreamedBytes.get(),
                         cfg.attenuationExponent.get().floatValue(),
-                        cfg.volumeSmoothing.get().floatValue()
+                        cfg.volumeSmoothing.get().floatValue(),
+                        cfg.voiceMaterializeGain.get().floatValue(),
+                        cfg.voiceVirtualizeGain.get().floatValue()
                 );
                 AuralisApi.setEngine(engine);
                 LOGGER.info(
-                        "Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={}, deviceMonoSources={}, deviceStereoSources={})",
+                        "Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={}, deviceMonoSources={}, deviceStereoSources={}, voiceMaterializeGain={}, voiceVirtualizeGain={})",
                         effectiveMaxSources,
                         configuredMaxSources,
                         reserve,
                         sourceBudget.monoSources(),
-                        sourceBudget.stereoSources()
+                        sourceBudget.stereoSources(),
+                        cfg.voiceMaterializeGain.get(),
+                        cfg.voiceVirtualizeGain.get()
                 );
             });
         });

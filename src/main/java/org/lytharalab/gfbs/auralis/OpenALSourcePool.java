@@ -2,31 +2,29 @@ package org.lytharalab.gfbs.auralis;
 /**
  * G.F.B.S.-Auralis (gfbs_auralis) - A Minecraft Mod
  * Copyright (C) 2026 LytharaLab
- * <p>
+ *
  * This program is licensed under the MIT License.
- * <p>
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the Software
- * is provided to do so, subject to the following conditions:
- * <p>
- * The above copyright notice and this permission notice shall be included in all copies
- * or substantial portions of the Software.
- * <p>
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
- * PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
- * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-import org.lwjgl.openal.AL10;
 import org.jetbrains.annotations.Nullable;
+import org.lwjgl.openal.AL10;
 
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Pool of scarce physical OpenAL sources.
+ *
+ * <p>Since Auralis 2.1 a source is only a physical rendering resource. Logical
+ * sound instances are allowed to outnumber this pool and are virtualized by
+ * {@link AuralisVoiceManager}. The pool therefore never destroys another sound
+ * instance to satisfy an allocation request.</p>
+ */
 final class OpenALSourcePool implements AutoCloseable {
     record SourceHandle(int sourceId) {}
 
@@ -39,7 +37,7 @@ final class OpenALSourcePool implements AutoCloseable {
     final Map<SourceHandle, AuralisSoundInstanceImpl> sourceToInstance = new ConcurrentHashMap<>();
     private int generatedCount = 0;
     private int adaptiveMaxSources;
-    
+
     // Metrics
     private int poolExhaustedCount = 0;
     private int sourcesRecycledCount = 0;
@@ -47,21 +45,18 @@ final class OpenALSourcePool implements AutoCloseable {
 
     OpenALSourcePool(AuralisAL al, int maxSources) {
         this.al = Objects.requireNonNull(al, "al");
-        this.maxSources = maxSources;
-        this.adaptiveMaxSources = maxSources;
+        this.maxSources = Math.max(1, maxSources);
+        this.adaptiveMaxSources = this.maxSources;
     }
 
     @Nullable SourceHandle acquire(AuralisSoundInstanceImpl instance) {
-        SourceHandle h = tryAcquire(instance);
-        if (h != null) return h;
-
-        if (evictLowestPriorityNonLooping()) {
-            h = tryAcquire(instance);
-            if (h != null) return h;
+        SourceHandle handle = tryAcquire(instance);
+        if (handle == null) {
+            synchronized (lock) {
+                poolExhaustedCount++;
+            }
         }
-
-        poolExhaustedCount++;
-        return null;
+        return handle;
     }
 
     private @Nullable SourceHandle tryAcquire(AuralisSoundInstanceImpl instance) {
@@ -93,10 +88,12 @@ final class OpenALSourcePool implements AutoCloseable {
             synchronized (lock) {
                 generatedCount = Math.max(0, generatedCount - 1);
                 allocFailedCount++;
-                adaptiveMaxSources = Math.min(adaptiveMaxSources, generatedCount);
+                // Once a driver refuses a source, stop hammering it every tick.
+                adaptiveMaxSources = Math.max(1, Math.min(adaptiveMaxSources, generatedCount));
                 if (allocFailedCount == 1 || (allocFailedCount % 50) == 0) {
                     GFBsAuralis.LOGGER.warn(
-                            "OpenAL source allocation failed (attempts={}, maxSources={}, effectiveMaxSources={}, generated={}). Consider lowering client config 'maxSources'.",
+                            "OpenAL source allocation failed (attempts={}, maxSources={}, effectiveMaxSources={}, generated={}). " +
+                                    "Auralis will virtualize excess voices.",
                             allocFailedCount, maxSources, adaptiveMaxSources, generatedCount
                     );
                 }
@@ -113,98 +110,89 @@ final class OpenALSourcePool implements AutoCloseable {
         return created;
     }
 
-    private boolean evictLowestPriorityNonLooping() {
-        SourceHandle lowestPrioritySource = null;
-        int lowestPriority = Integer.MAX_VALUE;
-
+    void release(SourceHandle handle) {
+        if (handle == null) return;
         synchronized (lock) {
-            if (inUse.isEmpty()) return false;
-            for (SourceHandle handle : inUse) {
-                AuralisSoundInstanceImpl instance = sourceToInstance.get(handle);
-                if (instance != null && !instance.isLooping()) {
-                    int priority = instance.getPriority();
-                    if (priority < lowestPriority) {
-                        lowestPriority = priority;
-                        lowestPrioritySource = handle;
-                    }
-                }
-            }
-        }
-
-        if (lowestPrioritySource == null) return false;
-        AuralisSoundInstanceImpl instance = sourceToInstance.get(lowestPrioritySource);
-        if (instance == null) return false;
-        try {
-            instance.onEvicted();
-            return true;
-        } catch (Throwable ignored) {
-            return false;
+            sourceToInstance.remove(handle);
+            if (!inUse.remove(handle)) return;
+            free.addLast(handle);
+            sourcesRecycledCount++;
         }
     }
 
-    void release(SourceHandle h) {
-        synchronized (lock) {
-            if (!inUse.remove(h)) return;
-            free.addLast(h);
-        }
-    }
-
+    /**
+     * Defensive cleanup for a source whose owner disappeared unexpectedly. Normal
+     * 2.1 voice transitions release sources explicitly, so this should be rare.
+     */
     void tickRecycleEndedSources() {
-        List<SourceHandle> candidates = new ArrayList<>();
+        List<SourceHandle> orphaned = new ArrayList<>();
         synchronized (lock) {
             for (SourceHandle handle : inUse) {
                 if (!sourceToInstance.containsKey(handle)) {
-                    candidates.add(handle);
+                    orphaned.add(handle);
                 }
             }
         }
-        if (candidates.isEmpty()) return;
+        if (orphaned.isEmpty()) return;
 
-        List<SourceHandle> stopped = al.callBlocking(() -> {
-            List<SourceHandle> out = new ArrayList<>();
-            for (SourceHandle h : candidates) {
-                int state = AL10.alGetSourcei(h.sourceId(), AL10.AL_SOURCE_STATE);
-                if (state == AL10.AL_STOPPED) {
-                    out.add(h);
+        al.executeBlocking(() -> {
+            for (SourceHandle handle : orphaned) {
+                try {
+                    AL10.alSourceStop(handle.sourceId());
+                    AL10.alSourcei(handle.sourceId(), AL10.AL_BUFFER, 0);
+                } catch (Throwable ignored) {
                 }
             }
-            return out;
         });
 
-        if (stopped.isEmpty()) return;
         synchronized (lock) {
-            for (SourceHandle h : stopped) {
-                if (inUse.remove(h)) {
-                    free.addLast(h);
+            for (SourceHandle handle : orphaned) {
+                if (inUse.remove(handle)) {
+                    free.addLast(handle);
                     sourcesRecycledCount++;
                 }
             }
         }
     }
-    
-    // Metrics access methods
-    public int getMaxSources() {
+
+    int getMaxSources() {
         return maxSources;
     }
-    
-    public int getFreeSources() {
+
+    int getEffectiveMaxSources() {
+        synchronized (lock) {
+            return Math.max(1, adaptiveMaxSources);
+        }
+    }
+
+    int getGeneratedSources() {
+        synchronized (lock) {
+            return generatedCount;
+        }
+    }
+
+    int getFreeSources() {
         synchronized (lock) {
             return free.size();
         }
     }
-    
-    public int getInUseSources() {
+
+    int getInUseSources() {
         synchronized (lock) {
             return inUse.size();
         }
     }
-    
-    public int getPoolExhaustedCount() {
-        return poolExhaustedCount;
+
+    int getPoolExhaustedCount() {
+        synchronized (lock) {
+            return poolExhaustedCount;
+        }
     }
-    
-    public int getSourcesRecycledCount() {
-        return sourcesRecycledCount;
+
+    int getSourcesRecycledCount() {
+        synchronized (lock) {
+            return sourcesRecycledCount;
+        }
     }
 
     @Override
@@ -215,12 +203,17 @@ final class OpenALSourcePool implements AutoCloseable {
             allSources.clear();
             inUse.clear();
             free.clear();
+            sourceToInstance.clear();
             generatedCount = 0;
         }
         al.executeBlocking(() -> {
-            for (SourceHandle h : all) {
-                AL10.alSourceStop(h.sourceId());
-                AL10.alDeleteSources(h.sourceId());
+            for (SourceHandle handle : all) {
+                try {
+                    AL10.alSourceStop(handle.sourceId());
+                    AL10.alSourcei(handle.sourceId(), AL10.AL_BUFFER, 0);
+                    AL10.alDeleteSources(handle.sourceId());
+                } catch (Throwable ignored) {
+                }
             }
         });
     }

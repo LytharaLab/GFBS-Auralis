@@ -47,6 +47,7 @@ final class SoundBufferCache {
     // streamedChunkSize/maxStreamedBytes are no longer needed here as we don't pre-decode
     private final Map<ResourceLocation, Entry> cache = new ConcurrentHashMap<>();
     private final Map<Integer, ResourceLocation> bufferToPath = new ConcurrentHashMap<>();
+    private final Map<Integer, Double> bufferDurations = new ConcurrentHashMap<>();
     
     private final ExecutorService asyncExecutor = Executors.newFixedThreadPool(
             Math.max(2, Runtime.getRuntime().availableProcessors()),
@@ -83,6 +84,7 @@ final class SoundBufferCache {
                     }
 
                     if (tryIncrement(old)) {
+                        bufferDurations.remove(bufferId);
                         al.submit(() -> AL10.alDeleteBuffers(bufferId));
                         return old.bufferId();
                     }
@@ -124,6 +126,7 @@ final class SoundBufferCache {
                 }
 
                 if (tryIncrement(old)) {
+                    bufferDurations.remove(bufferId);
                     al.submit(() -> AL10.alDeleteBuffers(bufferId));
                     return old.bufferId();
                 }
@@ -147,23 +150,28 @@ final class SoundBufferCache {
         assert pcm.sampleRate() > 0;
         assert pcm.pcmData() != null && pcm.pcmData().remaining() > 0;
         
-        return al.callBlocking(() -> {
+        int channels = pcm.alFormat() == AL10.AL_FORMAT_MONO16 ? 1 : 2;
+        double durationSeconds = pcm.pcmData().remaining() / (double) (Math.max(1, channels) * 2 * pcm.sampleRate());
+
+        int id = al.callBlocking(() -> {
             try {
-                int id = AL10.alGenBuffers();
-                if (id == 0) {
+                int bufferId = AL10.alGenBuffers();
+                if (bufferId == 0) {
                     throw new IllegalStateException("Failed to generate OpenAL buffer: " + AL10.alGetError());
                 }
-                AL10.alBufferData(id, pcm.alFormat(), pcm.pcmData(), pcm.sampleRate());
+                AL10.alBufferData(bufferId, pcm.alFormat(), pcm.pcmData(), pcm.sampleRate());
                 int err = AL10.alGetError();
                 if (err != AL10.AL_NO_ERROR) {
-                    AL10.alDeleteBuffers(id);
+                    AL10.alDeleteBuffers(bufferId);
                     throw new IllegalStateException("Failed to upload buffer data: " + err);
                 }
-                return id;
+                return bufferId;
             } finally {
                 pcm.free();
             }
         });
+        bufferDurations.put(id, durationSeconds);
+        return id;
     }
 
     /**
@@ -175,8 +183,11 @@ final class SoundBufferCache {
             Resource r = mc.getResourceManager().getResource(soundPath).orElseThrow(
                     () -> new IllegalArgumentException("Missing sound resource: " + soundPath)
             );
-            InputStream in = r.open(); // StreamDecoder will close this stream
-            return OggVorbisDecoder.createStreamDecoder(in);
+            // StreamDecoder consumes the compressed file into native memory during construction,
+            // so the resource stream can be closed immediately afterwards.
+            try (InputStream in = r.open()) {
+                return OggVorbisDecoder.createStreamDecoder(in);
+            }
         } catch (Exception e) {
             GFBsAuralis.LOGGER.error("Failed to create stream decoder for: {}", soundPath, e);
             throw new RuntimeException("Failed to create stream decoder", e);
@@ -228,6 +239,7 @@ final class SoundBufferCache {
         if (left == 0) {
             cache.remove(soundPath, entry);
             bufferToPath.remove(bufferId);
+            bufferDurations.remove(bufferId);
             al.submit(() -> AL10.alDeleteBuffers(bufferId));
         }
     }
@@ -248,6 +260,12 @@ final class SoundBufferCache {
         }
         cache.clear();
         bufferToPath.clear();
+        bufferDurations.clear();
+    }
+
+    double getBufferDurationSeconds(int bufferId) {
+        if (bufferId < 0) return 0.0;
+        return bufferDurations.getOrDefault(bufferId, 0.0);
     }
 
     void shutdown() {

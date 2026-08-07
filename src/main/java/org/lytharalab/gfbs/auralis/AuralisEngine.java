@@ -2,28 +2,12 @@ package org.lytharalab.gfbs.auralis;
 /**
  * G.F.B.S.-Auralis (gfbs_auralis) - A Minecraft Mod
  * Copyright (C) 2026 LytharaLab
- * <p>
+ *
  * This program is licensed under the MIT License.
- * <p>
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the Software
- * is provided to do so, subject to the following conditions:
- * <p>
- * The above copyright notice and this permission notice shall be included in all copies
- * or substantial portions of the Software.
- * <p>
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
- * PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
- * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.sounds.Sound;
 import net.minecraft.client.sounds.SoundManager;
 import net.minecraft.client.sounds.WeighedSoundEvents;
@@ -33,7 +17,6 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 import org.lwjgl.openal.AL10;
-import org.lwjgl.openal.AL11;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
 import org.lytharalab.gfbs.auralis.api.IAuralisEngine;
 import org.lytharalab.gfbs.auralis.api.event.SoundCreatedEvent;
@@ -48,18 +31,25 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 public final class AuralisEngine implements IAuralisEngine {
+    private static final float DEFAULT_VOICE_MATERIALIZE_GAIN = 0.0010f;
+    private static final float DEFAULT_VOICE_VIRTUALIZE_GAIN = 0.00025f;
     private final Minecraft mc;
     private final AuralisAL al;
 
     private final OpenALSourcePool sourcePool;
     private final SoundBufferCache bufferCache;
     private final AuralisPluginManager pluginManager;
+    private final AuralisVoiceManager voiceManager;
     private final float attenuationExponent;
     private final float volumeSmoothing;
     private final int streamedChunkSize;
 
     private final ConcurrentMap<AuralisSoundInstance, AuralisSoundInstanceImpl> instances = new ConcurrentHashMap<>();
 
+    /**
+     * Backwards-compatible constructor retained for integrations compiled against
+     * the pre-2.1 engine constructor. Voice virtualization uses safe defaults.
+     */
     public AuralisEngine(
             Minecraft mc,
             AuralisAL al,
@@ -69,12 +59,37 @@ public final class AuralisEngine implements IAuralisEngine {
             float attenuationExponent,
             float volumeSmoothing
     ) {
+        this(
+                mc,
+                al,
+                maxSources,
+                streamedChunkSize,
+                maxStreamedBytes,
+                attenuationExponent,
+                volumeSmoothing,
+                DEFAULT_VOICE_MATERIALIZE_GAIN,
+                DEFAULT_VOICE_VIRTUALIZE_GAIN
+        );
+    }
+
+    public AuralisEngine(
+            Minecraft mc,
+            AuralisAL al,
+            int maxSources,
+            int streamedChunkSize,
+            int maxStreamedBytes,
+            float attenuationExponent,
+            float volumeSmoothing,
+            float voiceMaterializeGain,
+            float voiceVirtualizeGain
+    ) {
         this.mc = Objects.requireNonNull(mc, "mc");
         this.al = Objects.requireNonNull(al, "al");
 
         this.sourcePool = new OpenALSourcePool(al, maxSources);
         this.bufferCache = new SoundBufferCache(mc, al, streamedChunkSize, maxStreamedBytes);
         this.pluginManager = new AuralisPluginManager();
+        this.voiceManager = new AuralisVoiceManager(sourcePool, voiceMaterializeGain, voiceVirtualizeGain);
         this.streamedChunkSize = streamedChunkSize;
         this.attenuationExponent = attenuationExponent;
         this.volumeSmoothing = volumeSmoothing;
@@ -82,6 +97,30 @@ public final class AuralisEngine implements IAuralisEngine {
 
     public AuralisPluginManager getPluginManager() {
         return pluginManager;
+    }
+
+    /** Number of retained logical instances, including stopped reusable instances. */
+    @Override
+    public int getLogicalVoiceCount() {
+        return voiceManager.getLogicalVoiceCount();
+    }
+
+    /** Number of logical voices whose playback clocks are currently running. */
+    @Override
+    public int getPlayingVoiceCount() {
+        return voiceManager.getPlayingVoiceCount();
+    }
+
+    /** Number of logical voices currently backed by real OpenAL sources. */
+    @Override
+    public int getPhysicalVoiceCount() {
+        return voiceManager.getPhysicalVoiceCount();
+    }
+
+    /** Number of currently-playing logical voices without an OpenAL source. */
+    @Override
+    public int getVirtualVoiceCount() {
+        return voiceManager.getVirtualVoiceCount();
     }
 
     @Override
@@ -111,8 +150,7 @@ public final class AuralisEngine implements IAuralisEngine {
             AuralisSoundInstanceImpl inst;
             if (streamed) {
                 var decoder = bufferCache.createStreamDecoder(soundPath);
-                int[] buffers = bufferCache.createStreamingBuffers(4);
-                inst = new AuralisSoundInstanceImpl(al, decoder, buffers, streamedChunkSize, bufferCache, sourcePool);
+                inst = new AuralisSoundInstanceImpl(al, decoder, streamedChunkSize, bufferCache, sourcePool);
             } else {
                 int bufferId = bufferCache.acquireBuffer(soundPath);
                 if (bufferId == -1) {
@@ -121,19 +159,14 @@ public final class AuralisEngine implements IAuralisEngine {
                 inst = new AuralisSoundInstanceImpl(al, bufferId, bufferCache, sourcePool);
             }
 
-            // Apply global processors
-            for (AudioProcessor p : pluginManager.getGlobalProcessors()) {
-                inst.addProcessor(p);
-            }
-
-            // Fire event
-            pluginManager.getEventBus().post(new SoundCreatedEvent(inst, soundEvent));
-
+            configureNewInstance(inst, soundEvent);
             instances.put(inst, inst);
             return inst;
         } catch (Exception e) {
             GFBsAuralis.LOGGER.error("Failed to create sound instance for: {} ;E: {}", eventId, e.getMessage());
-            return new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool);
+            AuralisSoundInstanceImpl fallback = new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool);
+            instances.put(fallback, fallback);
+            return fallback;
         }
     }
 
@@ -147,10 +180,13 @@ public final class AuralisEngine implements IAuralisEngine {
             CompletableFuture<AuralisSoundInstanceImpl> futureInst;
             if (streamed) {
                 futureInst = bufferCache.createStreamDecoderAsync(soundPath)
-                        .thenApply(decoder -> {
-                            int[] buffers = bufferCache.createStreamingBuffers(4);
-                            return new AuralisSoundInstanceImpl(al, decoder, buffers, streamedChunkSize, bufferCache, sourcePool);
-                        });
+                        .thenApply(decoder -> new AuralisSoundInstanceImpl(
+                                al,
+                                decoder,
+                                streamedChunkSize,
+                                bufferCache,
+                                sourcePool
+                        ));
             } else {
                 futureInst = bufferCache.acquireBufferAsync(soundPath)
                         .thenApply(bufferId -> {
@@ -162,14 +198,7 @@ public final class AuralisEngine implements IAuralisEngine {
             }
 
             return futureInst.thenApply(inst -> {
-                // Apply global processors
-                for (AudioProcessor p : pluginManager.getGlobalProcessors()) {
-                    inst.addProcessor(p);
-                }
-
-                // Fire event
-                pluginManager.getEventBus().post(new SoundCreatedEvent(inst, soundEvent));
-
+                configureNewInstance(inst, soundEvent);
                 instances.put(inst, inst);
                 return (AuralisSoundInstance) inst;
             }).exceptionally(ex -> {
@@ -186,19 +215,19 @@ public final class AuralisEngine implements IAuralisEngine {
         }
     }
 
+    private void configureNewInstance(AuralisSoundInstanceImpl inst, SoundEvent soundEvent) {
+        for (AudioProcessor processor : pluginManager.getGlobalProcessors()) {
+            inst.addProcessor(processor);
+        }
+        pluginManager.getEventBus().post(new SoundCreatedEvent(inst, soundEvent));
+    }
+
     private ResourceLocation resolveSoundPath(ResourceLocation eventId) {
         Sound chosen = resolveToConcreteSound(eventId);
         ResourceLocation raw = chosen.getLocation();
         String ns = raw.getNamespace();
         String path = raw.getPath();
-        
-        // Normalize path to assets/<namespace>/sounds/<path>.ogg
-        // ResourceLocation in Minecraft assumes "sounds/" prefix is NOT part of the path if loaded via SoundManager?
-        // Actually, SoundManager loads sounds.json.
-        // If sounds.json says "category": "record", "name": "music/disc/cat"
-        // It looks for assets/minecraft/sounds/music/disc/cat.ogg
-        // The ResourceLocation for getResource is "minecraft:sounds/music/disc/cat.ogg".
-        
+
         StringBuilder sb = new StringBuilder();
         if (!path.startsWith("sounds/")) {
             sb.append("sounds/");
@@ -207,7 +236,7 @@ public final class AuralisEngine implements IAuralisEngine {
         if (!path.endsWith(".ogg")) {
             sb.append(".ogg");
         }
-        
+
         return new ResourceLocation(ns, sb.toString());
     }
 
@@ -219,17 +248,16 @@ public final class AuralisEngine implements IAuralisEngine {
         }
 
         RandomSource rnd = RandomSource.create();
-        Sound s = events.getSound(rnd);
-        if (s == SoundManager.EMPTY_SOUND) {
+        Sound sound = events.getSound(rnd);
+        if (sound == SoundManager.EMPTY_SOUND) {
             throw new IllegalStateException("SoundEvent resolved to EMPTY_SOUND: " + soundEventId);
         }
-        return s;
+        return sound;
     }
 
     @Override
     public void bind(AuralisSoundInstance instance) {
-        AuralisSoundInstanceImpl impl = requireImpl(instance);
-        impl.bind();
+        requireImpl(instance).bind();
     }
 
     @Override
@@ -241,49 +269,57 @@ public final class AuralisEngine implements IAuralisEngine {
 
     @Override
     public void tick() {
-        for (AuralisSoundInstanceImpl inst : instances.values()) {
-            try {
-                inst.processPendingBindAndPlay();
-            } catch (Throwable ignored) {
-            }
-        }
-
         Camera cam = mc.gameRenderer.getMainCamera();
         Vec3 listenerPos = cam.getPosition();
         float pitch = cam.getXRot();
         float yaw = cam.getYRot();
         Vec3 forward = Vec3.directionFromRotation(pitch, yaw);
         Vec3 up = Vec3.directionFromRotation(pitch - 90.0F, yaw);
+        long nowNanos = System.nanoTime();
 
+        // Use a stable snapshot for this frame. Async creation may mutate the map.
+        List<AuralisSoundInstanceImpl> snapshot = new ArrayList<>(instances.values());
+
+        // Queue the listener update before any materialization. materializePhysicalVoice()
+        // uses executeBlocking, so the OpenAL queue ordering guarantees a newly started
+        // source sees the newest listener transform before it becomes audible.
         al.submit(() -> {
             AL10.alDopplerFactor(0.0f);
-
             AL10.alListener3f(AL10.AL_POSITION, (float) listenerPos.x, (float) listenerPos.y, (float) listenerPos.z);
             AL10.alListener3f(AL10.AL_VELOCITY, 0f, 0f, 0f);
-
             float[] ori = new float[]{
                     (float) forward.x, (float) forward.y, (float) forward.z,
                     (float) up.x, (float) up.y, (float) up.z
             };
             AL10.alListenerfv(AL10.AL_ORIENTATION, ori);
+        });
 
-            for (AuralisSoundInstanceImpl inst : instances.values()) {
-                inst.updateStreamedBuffersOnALThread();
-                inst.handleNaturalCompletionOnALThread();
-                inst.applyVelocityZeroOnALThread();
-                inst.applyDistanceAttenuationOnALThread(listenerPos, attenuationExponent, volumeSmoothing);
+        // Advances ALL logical clocks and maps only the currently useful subset to
+        // physical OpenAL sources.
+        voiceManager.tick(snapshot, listenerPos, attenuationExponent, nowNanos);
+
+        // One batched AL task updates only physical voices. Virtual voices incur no
+        // OpenAL, streaming decode, or distance-update work.
+        al.submit(() -> {
+            for (AuralisSoundInstanceImpl inst : snapshot) {
+                if (!inst.isDisposed() && inst.isPhysicalVoice()) {
+                    inst.updatePhysicalOnALThread(listenerPos, attenuationExponent, volumeSmoothing);
+                }
             }
         });
 
+        // This blocking defensive sweep also establishes a barrier after the AL update
+        // above, so fallback natural-completion flags are visible below.
         sourcePool.tickRecycleEndedSources();
 
         List<AuralisSoundInstanceImpl> toRemove = new ArrayList<>();
-        for (AuralisSoundInstanceImpl inst : instances.values()) {
+        for (AuralisSoundInstanceImpl inst : snapshot) {
             try {
                 if (inst.finalizeNaturalCompletionIfNeeded() || inst.consumePendingEngineRemoval()) {
                     toRemove.add(inst);
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                GFBsAuralis.LOGGER.debug("Error finalizing Auralis voice: {}", t.getMessage());
             }
         }
         for (AuralisSoundInstanceImpl inst : toRemove) {
@@ -297,7 +333,7 @@ public final class AuralisEngine implements IAuralisEngine {
     }
 
     public void shutdown(boolean stopOpenAL) {
-        // 1. Stop all instances first to ensure playback stops.
+        // Stop logical voices and release their physical sources first.
         for (AuralisSoundInstanceImpl inst : instances.values()) {
             try {
                 inst.stop();
@@ -305,13 +341,9 @@ public final class AuralisEngine implements IAuralisEngine {
             }
         }
 
-        // 2. Close source pool (deletes all OpenAL sources).
-        // This is crucial: Deleting sources automatically detaches all buffers.
-        // If we delete buffers while they are still attached (even if stopped),
-        // OpenAL throws AL_INVALID_OPERATION.
+        // Delete the source pool before deleting any buffers still known to instances.
         sourcePool.close();
 
-        // 3. Free buffers (now safe to delete as they are detached).
         for (AuralisSoundInstanceImpl inst : instances.values()) {
             try {
                 inst.markDisposedAfterSourcePoolShutdown();
