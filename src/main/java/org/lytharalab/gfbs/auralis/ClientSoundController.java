@@ -36,7 +36,7 @@ public final class ClientSoundController {
 
     private static final Map<String, AuralisSoundInstance> INSTANCES = new ConcurrentHashMap<>();
     private static final Map<String, BindTarget> BINDINGS = new ConcurrentHashMap<>();
-    private static final int MAX_PENDING_PLAY = 512;
+    private static final int MAX_PENDING_PLAY = 2048;
 
     public sealed interface BindTarget {
         record Entity(int entityId, UUID entityUuid) implements BindTarget {}

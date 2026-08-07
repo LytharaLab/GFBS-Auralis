@@ -36,7 +36,13 @@ public interface AuralisSoundInstance {
     void play();
     void pause();
     void stop();
+
+    /**
+     * Returns the logical playback state. Since 2.1.0 this can remain {@code true}
+     * while the instance is virtual and therefore owns no physical OpenAL Source.
+     */
     boolean isPlaying();
+
     boolean isPaused();
 
     /**
@@ -46,7 +52,32 @@ public interface AuralisSoundInstance {
      */
     AuralisSoundInstance addProcessor(AudioProcessor processor);
 
+    /**
+     * Returns whether this logical instance currently owns a physical OpenAL Source.
+     * A playing 2.1.0 instance may legitimately return {@code false} here while virtual.
+     */
     boolean isBound();
+
+    /**
+     * Returns true when the logical voice is playing but currently has no physical
+     * OpenAL Source. Virtual voices continue advancing their playback timeline.
+     */
+    default boolean isVirtual() {
+        return isPlaying() && !isBound();
+    }
+
+    /**
+     * Current authoritative logical playback position in source-media seconds.
+     * This advances while the voice is virtual.
+     */
+    default double getPlaybackPositionSeconds() {
+        return 0.0;
+    }
+
+    /** Duration of the resolved audio resource in seconds, or 0 when unknown. */
+    default double getDurationSeconds() {
+        return 0.0;
+    }
 
     AuralisSoundInstance setVolume(float volume);
     float getVolume();

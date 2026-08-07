@@ -37,5 +37,17 @@ public interface IAuralisEngine {
 
     void tick();
 
+    /** Total retained logical instances known to the engine. */
+    default int getLogicalVoiceCount() { return 0; }
+
+    /** Logical voices whose playback clocks are currently advancing. */
+    default int getPlayingVoiceCount() { return 0; }
+
+    /** Playing voices currently backed by physical OpenAL Sources. */
+    default int getPhysicalVoiceCount() { return 0; }
+
+    /** Playing voices currently virtualized without an OpenAL Source. */
+    default int getVirtualVoiceCount() { return 0; }
+
     void shutdown();
 }

@@ -36,8 +36,8 @@ public class GFBsAuralisConfig {
                     .push("general");
 
             maxConcurrentSounds = builder
-                    .comment("Maximum number of concurrent sounds per player")
-                    .defineInRange("maxConcurrentSounds", 256, 1, 1024);
+                    .comment("Maximum number of concurrent logical sounds per player")
+                    .defineInRange("maxConcurrentSounds", 1024, 1, 4096);
 
             defaultVolume = builder
                     .comment("Default volume for sounds (0.0 to 1.0)")
@@ -62,6 +62,8 @@ public class GFBsAuralisConfig {
         public final ForgeConfigSpec.IntValue maxStreamedBytes;
         public final ForgeConfigSpec.DoubleValue attenuationExponent;
         public final ForgeConfigSpec.DoubleValue volumeSmoothing;
+        public final ForgeConfigSpec.DoubleValue voiceMaterializeGain;
+        public final ForgeConfigSpec.DoubleValue voiceVirtualizeGain;
         public final ForgeConfigSpec.BooleanValue enableHrtf;
 
         ClientConfig(ForgeConfigSpec.Builder builder) {
@@ -69,7 +71,7 @@ public class GFBsAuralisConfig {
                     .push("audio");
 
             maxSources = builder
-                    .comment("Maximum number of OpenAL sources (0 = auto-detect a high safe limit for this device)")
+                    .comment("Maximum number of physical OpenAL sources (0 = auto-detect; excess logical voices are virtualized)")
                     .defineInRange("maxSources", 0, 0, 1024);
 
             reserveSourcesForVanilla = builder
@@ -91,6 +93,14 @@ public class GFBsAuralisConfig {
             volumeSmoothing = builder
                     .comment("Per-tick volume smoothing factor (0..1)")
                     .defineInRange("volumeSmoothing", 0.35, 0.0, 1.0);
+
+            voiceMaterializeGain = builder
+                    .comment("Predicted audible gain required for a virtual logical voice to acquire a physical OpenAL source")
+                    .defineInRange("voiceMaterializeGain", 0.0010, 0.0, 1.0);
+
+            voiceVirtualizeGain = builder
+                    .comment("Predicted audible gain below which a physical voice becomes virtual; keep this <= voiceMaterializeGain for hysteresis")
+                    .defineInRange("voiceVirtualizeGain", 0.00025, 0.0, 1.0);
 
             enableHrtf = builder
                     .comment("Enable OpenAL HRTF if supported by the device")
