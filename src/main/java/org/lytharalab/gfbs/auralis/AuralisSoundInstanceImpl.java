@@ -787,7 +787,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             }
 
             int sourceType = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_TYPE);
-            if (sourceType == AL10.AL_STREAMING) {
+            if (sourceType == AL11.AL_STREAMING) {
                 // Streaming is implemented by Auralis itself; never leave the
                 // OpenAL looping flag set while draining a recycled source.
                 AL10.alSourcei(sourceId, AL10.AL_LOOPING, AL10.AL_FALSE);
