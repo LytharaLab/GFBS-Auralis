@@ -765,6 +765,20 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         return 1.0f - (float) ((distance - minD) / (maxD - minD));
     }
 
+    /**
+     * Return a pooled OpenAL source to a clean, type-neutral state.
+     *
+     * <p>OpenAL reports a static source's single attached buffer through
+     * {@code AL_BUFFERS_QUEUED} as well. Calling {@code alSourceUnqueueBuffers}
+     * on that source is invalid and leaves AL_INVALID_VALUE behind for the
+     * strict Auralis AL-thread check. Only streaming sources may be unqueued.</p>
+     *
+     * <p>For streaming sources, only buffers OpenAL reports as processed are
+     * unqueued. This avoids a second AL_INVALID_VALUE path on implementations
+     * that do not expose every queued buffer as processed immediately after a
+     * stop. {@code AL_BUFFER = 0} then detaches any remaining queue/binding and
+     * returns the stopped source to an undetermined type.</p>
+     */
     private void resetSourceOnALThread(int sourceId) {
         try {
             int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
@@ -772,19 +786,29 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 AL10.alSourceStop(sourceId);
             }
 
-            // A source with queued streaming buffers must be unqueued before it
-            // can safely be reused as a static source (or by another stream).
-            int queued = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED);
-            if (queued > 0) {
-                try (MemoryStack stack = MemoryStack.stackPush()) {
-                    IntBuffer tmp = stack.mallocInt(queued);
-                    AL10.alSourceUnqueueBuffers(sourceId, tmp);
-                } catch (Throwable ignored) {
+            int sourceType = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_TYPE);
+            if (sourceType == AL10.AL_STREAMING) {
+                // Streaming is implemented by Auralis itself; never leave the
+                // OpenAL looping flag set while draining a recycled source.
+                AL10.alSourcei(sourceId, AL10.AL_LOOPING, AL10.AL_FALSE);
+
+                int queued = Math.max(0, AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_QUEUED));
+                int processed = Math.max(0, AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED));
+                int removable = Math.min(queued, processed);
+
+                if (removable > 0) {
+                    try (MemoryStack stack = MemoryStack.stackPush()) {
+                        IntBuffer tmp = stack.mallocInt(removable);
+                        AL10.alSourceUnqueueBuffers(sourceId, tmp);
+                    }
                 }
             }
 
+            // Detach a static buffer, or clear any remaining streaming queue,
+            // and put the pooled source back into AL_UNDETERMINED state.
             AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
             AL10.alSourceRewind(sourceId);
+
             // Safe baseline: a recycled source is silent until the new owner has
             // applied its complete spatial state. This is the key anti-flash guard.
             AL10.alSourcef(sourceId, AL10.AL_GAIN, 0.0f);
