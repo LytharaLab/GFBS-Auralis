@@ -15,7 +15,7 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 
 | Component | Version |
 | --- | --- |
-| GFBS: Auralis | `2.1.0` |
+| GFBS: Auralis | `2.1.1` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.13` |
 | Java | `17` |
@@ -23,9 +23,9 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 
 The OpenAL engine and all audio-device operations run on the physical client. Install the mod on the server as well when using its commands, packets, synchronized state, entity binding, or block binding.
 
-## 2.1.0 logical voice virtualization
+## 2.1.1 logical voice virtualization
 
-Auralis 2.1.0 separates a **logical sound instance** from a scarce physical OpenAL Source. This allows large scenes (including 1000+ active instances) to keep correct playback state while only audible/high-priority voices consume real Sources.
+Auralis 2.1.1 separates a **logical sound instance** from a scarce physical OpenAL Source. This allows large scenes (including 1000+ active instances) to keep correct playback state while only audible/high-priority voices consume real Sources.
 
 - Every playing instance advances an authoritative logical playback cursor, even while virtual.
 - Distant/low-contribution voices are virtualized instead of destroyed or stalled waiting for a Source.
@@ -127,7 +127,7 @@ AuralisSoundInstance.bind(instance);
 instance.play();
 ```
 
-In 2.1.0, `play()` starts the **logical voice**. `bind()` makes the instance eligible for physical playback, but `isBound()` may remain `false` while the voice is virtual. The logical playback clock still advances, `isPlaying()` remains `true`, and the correct playback position is restored when the listener gets close enough or a physical source becomes available.
+In 2.1.1, `play()` starts the **logical voice**. `bind()` makes the instance eligible for physical playback, but `isBound()` may remain `false` while the voice is virtual. The logical playback clock still advances, `isPlaying()` remains `true`, and the correct playback position is restored when the listener gets close enough or a physical source becomes available.
 
 You can inspect this state with `isVirtual()`, `getPlaybackPositionSeconds()`, and `getDurationSeconds()`.
 
