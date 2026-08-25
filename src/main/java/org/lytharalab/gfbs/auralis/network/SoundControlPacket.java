@@ -132,6 +132,12 @@ public class SoundControlPacket {
                 return;
             }
 
+            // A legacy integration packet must not restart an instance that is
+            // already owned by the protocol-4 authoritative timeline.
+            if (ClientSoundController.hasAuthoritativeState(packet.id)) {
+                return;
+            }
+
             switch (packet.action) {
                 case PLAY -> ClientSoundController.play(
                         packet.id,

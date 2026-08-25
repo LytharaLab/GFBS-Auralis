@@ -72,6 +72,7 @@ public class TweenControlPacket {
         NetworkEvent.Context ctx = contextSupplier.get();
         ctx.enqueueWork(() -> {
             if (!ctx.getDirection().getReceptionSide().isClient()) return;
+            if (ClientSoundController.hasAuthoritativeState(pkt.id)) return;
             ClientSoundController.startTween(
                     pkt.property, pkt.id,
                     pkt.targetX, pkt.targetY, pkt.targetZ,

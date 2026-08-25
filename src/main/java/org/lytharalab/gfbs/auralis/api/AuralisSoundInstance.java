@@ -88,6 +88,15 @@ public interface AuralisSoundInstance {
         return 0.0;
     }
 
+    /**
+     * Seek the authoritative logical cursor in source-media seconds.
+     * Implementations must marshal physical decoder/OpenAL work to their audio
+     * worker rather than blocking the caller (which may be a client tick thread).
+     */
+    default AuralisSoundInstance setPlaybackPositionSeconds(double seconds) {
+        return this;
+    }
+
     /** Duration of the resolved audio resource in seconds, or 0 when unknown. */
     default double getDurationSeconds() {
         return 0.0;

@@ -17,6 +17,8 @@ import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import org.lytharalab.gfbs.auralis.api.AuralisApi;
+import org.lytharalab.gfbs.auralis.server.AuralisServerManager;
+import org.lytharalab.gfbs.auralis.sync.AudioSyncClient;
 import org.slf4j.Logger;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -104,6 +106,7 @@ public class GFBsAuralis {
 
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
+        AuralisServerManager.onServerStart(event.getServer());
         LOGGER.info("GFBS-Auralis server starting...");
     }
 
@@ -121,6 +124,7 @@ public class GFBsAuralis {
             if (e.phase != TickEvent.Phase.END) return;
             if (ENGINE_RUNTIME_FAILED.get()) return;
             try {
+                AudioSyncClient.tick();
                 ClientSoundController.flushPendingIfReady();
                 var mc = Minecraft.getInstance();
                 if (mc.level != null) {
@@ -156,6 +160,7 @@ public class GFBsAuralis {
         @SubscribeEvent
         public static void onClientShutdown(GameShuttingDownEvent e){
             try {
+                AudioSyncClient.onDisconnected();
                 ClientSoundController.stopAll();
                 if (AuralisApi.isInitialized()) {
                     var eng = AuralisApi.engine();
@@ -173,7 +178,13 @@ public class GFBsAuralis {
         }
 
         @SubscribeEvent
+        public static void onClientLoggedIn(ClientPlayerNetworkEvent.LoggingIn e) {
+            AudioSyncClient.onConnected();
+        }
+
+        @SubscribeEvent
         public static void onClientLoggedOut(ClientPlayerNetworkEvent.LoggingOut e) {
+            AudioSyncClient.onDisconnected();
             ClientSoundController.stopAll();
         }
     }

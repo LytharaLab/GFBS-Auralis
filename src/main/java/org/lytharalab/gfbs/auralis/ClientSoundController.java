@@ -18,6 +18,8 @@ import org.lytharalab.gfbs.auralis.api.AuralisApi;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
 import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
 import org.lytharalab.gfbs.auralis.network.TweenControlPacket;
+import org.lytharalab.gfbs.auralis.network.sync.SyncedSoundState;
+import org.lytharalab.gfbs.auralis.sync.AudioSyncClient;
 import org.lytharalab.gfbs.auralis.tween.EasingDirection;
 import org.lytharalab.gfbs.auralis.tween.EasingStyle;
 import org.lytharalab.gfbs.auralis.tween.ForgeTweenHook;
@@ -30,6 +32,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -44,7 +47,11 @@ public final class ClientSoundController {
     private static final Map<String, String> BUS_ASSIGNMENTS = new ConcurrentHashMap<>();
     private static final Map<String, Long> PLAY_GENERATIONS = new ConcurrentHashMap<>();
     private static final Map<String, CompletableFuture<AuralisSoundInstance>> PENDING_CREATIONS = new ConcurrentHashMap<>();
+    private static final Map<String, SyncedSoundState> AUTHORITATIVE_STATES = new ConcurrentHashMap<>();
+    private static final Map<String, AuthoritativeDescriptor> AUTHORITATIVE_DESCRIPTORS = new ConcurrentHashMap<>();
+    private static final Set<String> AUTHORITATIVE_DORMANT = ConcurrentHashMap.newKeySet();
     private static final AtomicLong NEXT_PLAY_GENERATION = new AtomicLong(0L);
+    private static final AtomicLong LAST_AUTHORITATIVE_DRIFT_CHECK = new AtomicLong(0L);
     private static final Object STATE_LOCK = new Object();
     private static final int MAX_PENDING_PLAY = 2048;
 
@@ -68,8 +75,11 @@ public final class ClientSoundController {
             int priority,
             float minDistance,
             float maxDistance,
-            boolean isStreamed
+            boolean isStreamed,
+            boolean authoritative
     ) {}
+
+    private record AuthoritativeDescriptor(ResourceLocation soundEventId, boolean streamed) {}
 
     public static void flushPendingIfReady() {
         if (!AuralisApi.isInitialized()) return;
@@ -95,7 +105,8 @@ public final class ClientSoundController {
                     p.priority,
                     p.minDistance,
                     p.maxDistance,
-                    p.isStreamed
+                    p.isStreamed,
+                    p.authoritative
             );
             drained++;
         }
@@ -114,7 +125,8 @@ public final class ClientSoundController {
             int priority,
             float minDistance,
             float maxDistance,
-            boolean isStreamed
+            boolean isStreamed,
+            boolean authoritative
     ) {
         SoundEvent soundEvent = BuiltInRegistries.SOUND_EVENT.get(soundEventId);
         if (soundEvent == null) {
@@ -136,7 +148,8 @@ public final class ClientSoundController {
                 priority,
                 minDistance,
                 maxDistance,
-                isStreamed
+                isStreamed,
+                authoritative
         );
     }
 
@@ -154,9 +167,35 @@ public final class ClientSoundController {
             float maxDistance,
             boolean isStreamed
     ) {
+        beginPlay(
+                id, soundEventId, volume, pitch, speed, isStatic, position,
+                looping, priority, minDistance, maxDistance, isStreamed, false
+        );
+    }
+
+    private static void beginPlay(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 position,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            boolean isStreamed,
+            boolean authoritative
+    ) {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(soundEventId, "soundEventId");
         Objects.requireNonNull(position, "position");
+
+        if (!authoritative) {
+            AUTHORITATIVE_STATES.remove(id);
+            AUTHORITATIVE_DESCRIPTORS.remove(id);
+        }
 
         // Ensure sane distances
         float minD = Math.max(0.01f, minDistance);
@@ -197,7 +236,8 @@ public final class ClientSoundController {
                         priority,
                         minD,
                         maxD,
-                        isStreamed
+                        isStreamed,
+                        authoritative
                 ));
             } else {
                 PENDING_PLAY_SIZE.decrementAndGet();
@@ -220,7 +260,8 @@ public final class ClientSoundController {
                 priority,
                 minD,
                 maxD,
-                isStreamed
+                isStreamed,
+                authoritative
         );
     }
 
@@ -237,7 +278,8 @@ public final class ClientSoundController {
             int priority,
             float minDistance,
             float maxDistance,
-            boolean isStreamed
+            boolean isStreamed,
+            boolean authoritative
     ) {
         final CompletableFuture<AuralisSoundInstance> creation;
         try {
@@ -291,7 +333,8 @@ public final class ClientSoundController {
                     looping,
                     priority,
                     minDistance,
-                    maxDistance
+                    maxDistance,
+                    authoritative
             );
         });
     }
@@ -378,6 +421,89 @@ public final class ClientSoundController {
         return INSTANCES.get(id);
     }
 
+    public static boolean hasAuthoritativeState(String id) {
+        return AUTHORITATIVE_STATES.containsKey(id);
+    }
+
+    /** Apply one idempotent full state from the server-authoritative runtime. */
+    public static void applyAuthoritativeState(SyncedSoundState state, long serverNowNanos) {
+        Objects.requireNonNull(state, "state");
+        String id = state.id();
+        AuthoritativeDescriptor descriptor = new AuthoritativeDescriptor(
+                state.soundEventId(), state.streamed()
+        );
+        AuthoritativeDescriptor previous = AUTHORITATIVE_DESCRIPTORS.put(id, descriptor);
+        SyncedSoundState previousState = AUTHORITATIVE_STATES.put(id, state);
+        if (previousState == null || state.revision() > previousState.revision()) {
+            AUTHORITATIVE_DORMANT.remove(id);
+        }
+        BUS_ASSIGNMENTS.put(id, state.busName());
+        applyAuthoritativeBinding(state);
+
+        AuralisSoundInstance instance = INSTANCES.get(id);
+        boolean pending = PENDING_CREATIONS.containsKey(id);
+        if (!descriptor.equals(previous)
+                || (instance == null && !pending && !AUTHORITATIVE_DORMANT.contains(id))) {
+            Vec3 position = state.positionAt(serverNowNanos);
+            beginPlay(
+                    id,
+                    state.soundEventId(),
+                    state.volumeAt(serverNowNanos),
+                    state.pitchAt(serverNowNanos),
+                    state.speedAt(serverNowNanos),
+                    state.staticSound(),
+                    position,
+                    state.looping(),
+                    state.priority(),
+                    state.minDistanceAt(serverNowNanos),
+                    state.maxDistanceAt(serverNowNanos),
+                    state.streamed(),
+                    true
+            );
+            return;
+        }
+        if (instance != null) {
+            applyAuthoritativeToInstance(id, instance, state, serverNowNanos, true);
+        }
+    }
+
+    public static void removeAuthoritativeState(String id) {
+        AUTHORITATIVE_STATES.remove(id);
+        AUTHORITATIVE_DESCRIPTORS.remove(id);
+        AUTHORITATIVE_DORMANT.remove(id);
+        stop(id);
+    }
+
+    public static void resetAuthoritativeStates() {
+        List<String> ids = new ArrayList<>(AUTHORITATIVE_STATES.keySet());
+        AUTHORITATIVE_STATES.clear();
+        AUTHORITATIVE_DESCRIPTORS.clear();
+        AUTHORITATIVE_DORMANT.clear();
+        LAST_AUTHORITATIVE_DRIFT_CHECK.set(0L);
+        for (String id : ids) stop(id);
+    }
+
+    /** Evaluate server-clock tweens and periodically correct accumulated drift. */
+    public static void tickAuthoritativeStates(long serverNowNanos) {
+        long previousCheck = LAST_AUTHORITATIVE_DRIFT_CHECK.get();
+        boolean correctDrift = serverNowNanos - previousCheck >= 1_000_000_000L
+                && LAST_AUTHORITATIVE_DRIFT_CHECK.compareAndSet(previousCheck, serverNowNanos);
+        for (Map.Entry<String, SyncedSoundState> entry : AUTHORITATIVE_STATES.entrySet()) {
+            SyncedSoundState state = entry.getValue();
+            if (!correctDrift && !state.hasActiveTweens(serverNowNanos)) continue;
+            AuralisSoundInstance instance = INSTANCES.get(entry.getKey());
+            if (instance != null) {
+                applyAuthoritativeToInstance(
+                        entry.getKey(), instance, state, serverNowNanos, correctDrift
+                );
+            } else if (correctDrift
+                    && !AUTHORITATIVE_DORMANT.contains(entry.getKey())
+                    && !PENDING_CREATIONS.containsKey(entry.getKey())) {
+                applyAuthoritativeState(state, serverNowNanos);
+            }
+        }
+    }
+
     /** Remove controller references after one-shot voices finish naturally. */
     public static void pruneFinishedInstances() {
         List<AuralisSoundInstance> finished = new ArrayList<>();
@@ -386,6 +512,10 @@ public final class ClientSoundController {
                 AuralisSoundInstance instance = entry.getValue();
                 if (instance.isPlaying() || instance.isPaused()) continue;
                 if (INSTANCES.remove(entry.getKey(), instance)) {
+                    SyncedSoundState authoritative = AUTHORITATIVE_STATES.get(entry.getKey());
+                    if (authoritative != null && !authoritative.looping()) {
+                        AUTHORITATIVE_DORMANT.add(entry.getKey());
+                    }
                     PLAY_GENERATIONS.remove(entry.getKey());
                     BINDINGS.remove(entry.getKey());
                     BUS_ASSIGNMENTS.remove(entry.getKey());
@@ -532,6 +662,10 @@ public final class ClientSoundController {
             PLAY_GENERATIONS.clear();
             PENDING_PLAY.clear();
             PENDING_PLAY_SIZE.set(0);
+            AUTHORITATIVE_STATES.clear();
+            AUTHORITATIVE_DESCRIPTORS.clear();
+            AUTHORITATIVE_DORMANT.clear();
+            LAST_AUTHORITATIVE_DRIFT_CHECK.set(0L);
             pending = new ArrayList<>(PENDING_CREATIONS.values());
             PENDING_CREATIONS.clear();
             active = new ArrayList<>(INSTANCES.values());
@@ -539,6 +673,96 @@ public final class ClientSoundController {
         }
         for (CompletableFuture<AuralisSoundInstance> creation : pending) creation.cancel(false);
         for (AuralisSoundInstance inst : active) disposeInstance(inst);
+    }
+
+    private static void applyAuthoritativeBinding(SyncedSoundState state) {
+        switch (state.bindingKind()) {
+            case NONE -> BINDINGS.remove(state.id());
+            case ENTITY -> BINDINGS.put(
+                    state.id(), new BindTarget.Entity(state.entityId(), state.entityUuid())
+            );
+            case BLOCK -> BINDINGS.put(state.id(), new BindTarget.Block(state.blockPos()));
+        }
+    }
+
+    private static void configureAuthoritativeFields(
+            AuralisSoundInstance instance,
+            SyncedSoundState state,
+            long serverNowNanos
+    ) {
+        float volume = state.volumeAt(serverNowNanos);
+        float pitch = state.pitchAt(serverNowNanos);
+        float speed = state.speedAt(serverNowNanos);
+        Vec3 position = state.positionAt(serverNowNanos);
+        float minDistance = state.minDistanceAt(serverNowNanos);
+        float maxDistance = state.maxDistanceAt(serverNowNanos);
+
+        if (Math.abs(instance.getVolume() - volume) > 0.0001f) instance.setVolume(volume);
+        if (Math.abs(instance.getPitch() - pitch) > 0.0001f) instance.setPitch(pitch);
+        if (Math.abs(instance.getSpeed() - speed) > 0.0001f) instance.setSpeed(speed);
+        if (instance.isStatic() != state.staticSound()) instance.setStatic(state.staticSound());
+        if (state.bindingKind() == SyncedSoundState.BindingKind.NONE
+                && instance.getPosition().distanceToSqr(position) > 0.000_001) {
+            instance.setPosition(position);
+        }
+        if (instance.isLooping() != state.looping()) instance.setLooping(state.looping());
+        if (instance.getPriority() != state.priority()) instance.setPriority(state.priority());
+        if (Math.abs(instance.getMinDistance() - minDistance) > 0.0001f) {
+            instance.setMinDistance(minDistance);
+        }
+        if (Math.abs(instance.getMaxDistance() - maxDistance) > 0.0001f) {
+            instance.setMaxDistance(maxDistance);
+        }
+    }
+
+    private static void applyAuthoritativeToInstance(
+            String id,
+            AuralisSoundInstance instance,
+            SyncedSoundState state,
+            long serverNowNanos,
+            boolean correctTimeline
+    ) {
+        double desiredCursor = state.playbackPositionAt(serverNowNanos);
+        double localDuration = instance.getDurationSeconds();
+        if (state.looping() && localDuration > 0.0) {
+            desiredCursor %= localDuration;
+            if (desiredCursor < 0.0) desiredCursor += localDuration;
+        }
+        if (!state.looping()
+                && localDuration > 0.0
+                && desiredCursor >= localDuration - 0.000_001) {
+            AUTHORITATIVE_DORMANT.add(id);
+            stop(id);
+            return;
+        }
+
+        applyAuthoritativeBinding(state);
+        configureAuthoritativeFields(instance, state, serverNowNanos);
+        BUS_ASSIGNMENTS.put(id, state.busName());
+        try {
+            instance.setBus(state.busName());
+        } catch (IllegalArgumentException missingBus) {
+            // The bus snapshot may still be assembling. Retain the assignment and
+            // retry from the next synchronized tick instead of losing the route.
+        }
+
+        if (correctTimeline) {
+            double actualCursor = instance.getPlaybackPositionSeconds();
+            double error = Math.abs(actualCursor - desiredCursor);
+            if (state.looping() && localDuration > 0.0) {
+                error = Math.min(error, Math.abs(localDuration - error));
+            }
+            if (error > 0.075) instance.setPlaybackPositionSeconds(desiredCursor);
+        }
+
+        if (state.playbackStatus() == SyncedSoundState.PlaybackStatus.PAUSED) {
+            if (!instance.isPaused()) {
+                if (!instance.isPlaying()) instance.play();
+                instance.pause();
+            }
+        } else if (!instance.isPlaying()) {
+            instance.play();
+        }
     }
 
     private static void activateIfCurrent(
@@ -554,7 +778,8 @@ public final class ClientSoundController {
             boolean looping,
             int priority,
             float minDistance,
-            float maxDistance
+            float maxDistance,
+            boolean authoritative
     ) {
         if (instance instanceof AuralisSoundInstanceImpl impl && !impl.hasPlayableResource()) {
             clearFailedGeneration(id, generation, creation);
@@ -563,26 +788,45 @@ public final class ClientSoundController {
             return;
         }
 
+        SyncedSoundState synchronizedState = authoritative ? AUTHORITATIVE_STATES.get(id) : null;
+        boolean startPaused = false;
         try {
-            instance
-                    .setVolume(volume)
-                    .setPitch(pitch)
-                    .setSpeed(speed)
-                    .setStatic(isStatic)
-                    .setPosition(position)
-                    .setLooping(looping)
-                    .setPriority(priority)
-                    .setMinDistance(minDistance)
-                    .setMaxDistance(maxDistance);
+            if (synchronizedState != null) {
+                long serverNow = AudioSyncClient.estimateServerNowNanos();
+                double desiredCursor = synchronizedState.playbackPositionAt(serverNow);
+                double localDuration = instance.getDurationSeconds();
+                if (!synchronizedState.looping()
+                        && localDuration > 0.0
+                        && desiredCursor >= localDuration - 0.000_001) {
+                    AUTHORITATIVE_DORMANT.add(id);
+                    clearFailedGeneration(id, generation, creation);
+                    disposeInstance(instance);
+                    return;
+                }
+                configureAuthoritativeFields(instance, synchronizedState, serverNow);
+                instance.setPlaybackPositionSeconds(desiredCursor);
+                startPaused = synchronizedState.playbackStatus()
+                        == SyncedSoundState.PlaybackStatus.PAUSED;
+            } else {
+                instance
+                        .setVolume(volume)
+                        .setPitch(pitch)
+                        .setSpeed(speed)
+                        .setStatic(isStatic)
+                        .setPosition(position)
+                        .setLooping(looping)
+                        .setPriority(priority)
+                        .setMinDistance(minDistance)
+                        .setMaxDistance(maxDistance);
+            }
             String assignedBus = BUS_ASSIGNMENTS.getOrDefault(id, AudioBusSystem.MASTER);
             try {
                 instance.setBus(assignedBus);
             } catch (IllegalArgumentException missingBus) {
                 GFBsAuralis.LOGGER.warn(
-                        "Auralis bus {} is not available while activating {}; using Master",
+                        "Auralis bus {} is not available while activating {}; temporarily using Master",
                         assignedBus, id
                 );
-                BUS_ASSIGNMENTS.put(id, AudioBusSystem.MASTER);
                 instance.setBus(AudioBusSystem.MASTER);
             }
         } catch (Throwable configurationFailure) {
@@ -608,6 +852,7 @@ public final class ClientSoundController {
         try {
             AuralisSoundInstance.bind(instance);
             instance.play();
+            if (startPaused) instance.pause();
         } catch (Throwable failure) {
             activationFailure = failure;
         }

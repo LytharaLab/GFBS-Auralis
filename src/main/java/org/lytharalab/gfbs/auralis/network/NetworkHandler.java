@@ -33,7 +33,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class NetworkHandler {
-    private static final String PROTOCOL_VERSION = "3";
+    private static final String PROTOCOL_VERSION = "4";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(GFBsAuralis.MODID, "gfbs_auralis_main"),
             () -> PROTOCOL_VERSION,
@@ -57,6 +57,29 @@ public class NetworkHandler {
 
         registerMessage(BindControlPacket.class, BindControlPacket::encode, BindControlPacket::decode, BindControlPacket::handle);
         registerMessage(BusControlPacket.class, BusControlPacket::encode, BusControlPacket::decode, BusControlPacket::handle);
+
+        // Protocol 4: server-authoritative timeline, NTP-style monotonic clock
+        // calibration, idempotent deltas, and bounded atomic late-join snapshots.
+        registerMessage(AudioClockSyncRequestPacket.class,
+                AudioClockSyncRequestPacket::encode,
+                AudioClockSyncRequestPacket::decode,
+                AudioClockSyncRequestPacket::handle);
+        registerMessage(AudioClockSyncResponsePacket.class,
+                AudioClockSyncResponsePacket::encode,
+                AudioClockSyncResponsePacket::decode,
+                AudioClockSyncResponsePacket::handle);
+        registerMessage(AudioStateDeltaPacket.class,
+                AudioStateDeltaPacket::encode,
+                AudioStateDeltaPacket::decode,
+                AudioStateDeltaPacket::handle);
+        registerMessage(AudioBusStatePacket.class,
+                AudioBusStatePacket::encode,
+                AudioBusStatePacket::decode,
+                AudioBusStatePacket::handle);
+        registerMessage(AudioStateSnapshotPacket.class,
+                AudioStateSnapshotPacket::encode,
+                AudioStateSnapshotPacket::decode,
+                AudioStateSnapshotPacket::handle);
     }
 
     private static <MSG> void registerMessage(Class<MSG> messageType,

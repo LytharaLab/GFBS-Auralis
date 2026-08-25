@@ -298,6 +298,31 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     @Override
+    public AuralisSoundInstance setPlaybackPositionSeconds(double seconds) {
+        if (disposed.get() || resourcesFreed.get()) return this;
+        double requested = Double.isFinite(seconds) ? Math.max(0.0, seconds) : 0.0;
+        long now = System.nanoTime();
+        synchronized (playbackClockLock) {
+            if (durationSeconds > 0.0) {
+                if (looping) {
+                    requested %= durationSeconds;
+                } else {
+                    requested = Math.min(requested, durationSeconds);
+                }
+            }
+            logicalPlaybackSeconds = Math.max(0.0, requested);
+            logicalClockNanos = now;
+            pendingNaturalCompletion.set(false);
+        }
+
+        OpenALSourcePool.SourceHandle handle = source;
+        if (handle != null && startedPlayback.get()) {
+            restartPhysicalPlaybackFromLogicalCursorAsync(handle);
+        }
+        return this;
+    }
+
+    @Override
     public double getDurationSeconds() {
         return durationSeconds;
     }
@@ -906,6 +931,35 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 }
             }
             AL10.alSourcePlay(sourceId);
+        });
+    }
+
+    /** Non-blocking seek path used by network clock correction. */
+    private void restartPhysicalPlaybackFromLogicalCursorAsync(OpenALSourcePool.SourceHandle handle) {
+        final double cursor = normalizedCursorForPlayback();
+        final int sourceId = handle.sourceId();
+        submitALTask(() -> {
+            if (source != handle) return;
+
+            if (isStreamed) {
+                resetSourceOnALThread(sourceId);
+                applyNonGainParams(sourceId);
+                effectRack.applyToSourceOnALThread(sourceId, busRoute);
+                if (streamDecoder != null) {
+                    resetProcessorsOnALThread();
+                    streamDecoder.seekSeconds(cursor);
+                    queueInitialBuffers(sourceId);
+                }
+            } else {
+                AL10.alSourceStop(sourceId);
+                AL10.alSourceRewind(sourceId);
+                if (cursor > 0.0) {
+                    AL10.alSourcef(sourceId, AL11.AL_SEC_OFFSET, (float) cursor);
+                }
+            }
+            if (startedPlayback.get() && !paused.get()) {
+                AL10.alSourcePlay(sourceId);
+            }
         });
     }
 

@@ -10,7 +10,7 @@ package org.lytharalab.gfbs.auralis.api;
  * to deal in the Software without restriction, including without limitation
  * the rights to use, copy, modify, merge, publish, distribute, sublicense,
  * and/or sell copies of the Software, and to permit persons to whom the Software
- * is provided to do so, subject to the following conditions:
+ * is furnished to do so, subject to the following conditions:
  * <p>
  * The above copyright notice and this permission notice shall be included in all copies
  * or substantial portions of the Software.
@@ -21,344 +21,478 @@ package org.lytharalab.gfbs.auralis.api;
  * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
-import org.lytharalab.gfbs.auralis.network.BindControlPacket;
 import org.lytharalab.gfbs.auralis.network.BusControlPacket;
-import org.lytharalab.gfbs.auralis.network.NetworkHandler;
-import org.lytharalab.gfbs.auralis.network.SoundControlPacket;
 import org.lytharalab.gfbs.auralis.network.TweenControlPacket;
+import org.lytharalab.gfbs.auralis.server.AuralisServerManager;
 import org.lytharalab.gfbs.auralis.tween.EasingDirection;
 import org.lytharalab.gfbs.auralis.tween.EasingStyle;
-import net.minecraftforge.network.PacketDistributor;
 
 import java.util.Collection;
+import java.util.Objects;
+import java.util.UUID;
 
+/** Server-authoritative creation, control, targeting, and late-join replication API. */
 public class AuralisServerApi {
+    private static final UUID ZERO_UUID = new UUID(0L, 0L);
 
-    public static int playSound(String id, ResourceLocation soundEventId, float volume, float pitch, float speed, boolean isStatic,
-                                Vec3 pos, boolean looping, int priority, float minDistance, float maxDistance,
-                                Collection<ServerPlayer> targets) {
-        return playSoundInternal(id, soundEventId, volume, pitch, speed, isStatic, pos, looping, priority, minDistance, maxDistance, targets, false);
+    public AuralisServerApi() {
     }
 
-    public static int playStreamedSound(String id, ResourceLocation soundEventId, float volume, float pitch, float speed, boolean isStatic,
-                                      Vec3 pos, boolean looping, int priority, float minDistance, float maxDistance,
-                                      Collection<ServerPlayer> targets) {
-        return playSoundInternal(id, soundEventId, volume, pitch, speed, isStatic, pos, looping, priority, minDistance, maxDistance, targets, true);
+    /* --------------------------------------------------------------------- */
+    /* Creation                                                               */
+    /* --------------------------------------------------------------------- */
+
+    /** Backwards-compatible fixed-player playback. */
+    public static int playSound(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 pos,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            Collection<ServerPlayer> targets
+    ) {
+        return playSound(
+                id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                priority, minDistance, maxDistance, 0.0, audience(targets)
+        );
     }
 
-    private static int playSoundInternal(String id, ResourceLocation soundEventId, float volume, float pitch, float speed, boolean isStatic,
-                                         Vec3 pos, boolean looping, int priority, float minDistance, float maxDistance,
-                                         Collection<ServerPlayer> targets, boolean isStreamed) {
-        if (targets == null) return 0;
+    /** Persistent audience playback; use {@link AuralisAudience#all()} for future joins. */
+    public static int playSound(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 pos,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            AuralisAudience audience
+    ) {
+        return playSound(
+                id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                priority, minDistance, maxDistance, 0.0, audience
+        );
+    }
 
-        SoundControlPacket packet = new SoundControlPacket(
-                isStreamed ? SoundControlPacket.Action.STREAMED_PLAY : SoundControlPacket.Action.PLAY,
+    /**
+     * Persistent audience playback with an optional server-known media duration.
+     * A positive duration enables exact authoritative one-shot expiry; zero keeps
+     * the instance until an explicit stop while clients still suppress audio past
+     * their locally decoded duration.
+     */
+    public static int playSound(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 pos,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            double durationSeconds,
+            AuralisAudience audience
+    ) {
+        return playInternal(
+                id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                priority, minDistance, maxDistance, false, durationSeconds, audience
+        );
+    }
+
+    /** Backwards-compatible fixed-player streamed playback. */
+    public static int playStreamedSound(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 pos,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            Collection<ServerPlayer> targets
+    ) {
+        return playStreamedSound(
+                id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                priority, minDistance, maxDistance, 0.0, audience(targets)
+        );
+    }
+
+    public static int playStreamedSound(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 pos,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            AuralisAudience audience
+    ) {
+        return playStreamedSound(
+                id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                priority, minDistance, maxDistance, 0.0, audience
+        );
+    }
+
+    public static int playStreamedSound(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 pos,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            double durationSeconds,
+            AuralisAudience audience
+    ) {
+        return playInternal(
+                id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                priority, minDistance, maxDistance, true, durationSeconds, audience
+        );
+    }
+
+    private static int playInternal(
+            String id,
+            ResourceLocation soundEventId,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 pos,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            boolean streamed,
+            double durationSeconds,
+            AuralisAudience audience
+    ) {
+        return AuralisServerManager.playSound(
+                Objects.requireNonNull(audience, "audience"),
                 id,
                 soundEventId,
-                volume, pitch, speed,
+                volume,
+                pitch,
+                speed,
                 isStatic,
-                pos.x, pos.y, pos.z,
+                pos,
                 looping,
                 priority,
                 minDistance,
-                maxDistance
+                maxDistance,
+                streamed,
+                durationSeconds
         );
-
-        String message = "[GFBS Auralis] 已向 %d 名玩家发送播放指令: " + soundEventId + " (id=" + id + ")";
-        if (isStreamed) {
-            message = "[GFBS Auralis] 已向 %d 名玩家发送流式播放指令: " + soundEventId + " (id=" + id + ")";
-        }
-
-        return sendPacketToPlayers(packet, targets, message);
     }
 
+    /* --------------------------------------------------------------------- */
+    /* Playback and properties                                                */
+    /* --------------------------------------------------------------------- */
+
     public static int pauseSound(String id, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
+        return pauseSound(id, audience(targets));
+    }
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.PAUSE,
-                id,
-                new ResourceLocation("minecraft:empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
-        );
+    public static int pauseSound(String id, AuralisAudience audience) {
+        return AuralisServerManager.pauseSound(audience, id);
+    }
 
-        return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家发送暂停指令 (id=" + id + ")");
+    public static int resumeSound(String id, Collection<ServerPlayer> targets) {
+        return resumeSound(id, audience(targets));
+    }
+
+    public static int resumeSound(String id, AuralisAudience audience) {
+        return AuralisServerManager.resumeSound(audience, id);
     }
 
     public static int stopSound(String id, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
+        return stopSound(id, audience(targets));
+    }
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.STOP,
-                id,
-                new ResourceLocation("minecraft:empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+    public static int stopSound(String id, AuralisAudience audience) {
+        return AuralisServerManager.stopSound(audience, id);
+    }
+
+    public static int setVolume(String id, float value, Collection<ServerPlayer> targets) {
+        return setVolume(id, value, audience(targets));
+    }
+
+    public static int setVolume(String id, float value, AuralisAudience audience) {
+        return AuralisServerManager.setVolume(audience, id, value);
+    }
+
+    public static int setPitch(String id, float value, Collection<ServerPlayer> targets) {
+        return setPitch(id, value, audience(targets));
+    }
+
+    public static int setPitch(String id, float value, AuralisAudience audience) {
+        return AuralisServerManager.setPitch(audience, id, value);
+    }
+
+    public static int setSpeed(String id, float value, Collection<ServerPlayer> targets) {
+        return setSpeed(id, value, audience(targets));
+    }
+
+    public static int setSpeed(String id, float value, AuralisAudience audience) {
+        return AuralisServerManager.setSpeed(audience, id, value);
+    }
+
+    public static int setPosition(String id, Vec3 value, Collection<ServerPlayer> targets) {
+        return setPosition(id, value, audience(targets));
+    }
+
+    public static int setPosition(String id, Vec3 value, AuralisAudience audience) {
+        return AuralisServerManager.setPosition(audience, id, value);
+    }
+
+    public static int setStatic(String id, boolean value, Collection<ServerPlayer> targets) {
+        return setStatic(id, value, audience(targets));
+    }
+
+    public static int setStatic(String id, boolean value, AuralisAudience audience) {
+        return AuralisServerManager.setStatic(audience, id, value);
+    }
+
+    public static int setLooping(String id, boolean value, Collection<ServerPlayer> targets) {
+        return setLooping(id, value, audience(targets));
+    }
+
+    public static int setLooping(String id, boolean value, AuralisAudience audience) {
+        return AuralisServerManager.setLooping(audience, id, value);
+    }
+
+    public static int setPriority(String id, int value, Collection<ServerPlayer> targets) {
+        return setPriority(id, value, audience(targets));
+    }
+
+    public static int setPriority(String id, int value, AuralisAudience audience) {
+        return AuralisServerManager.setPriority(audience, id, value);
+    }
+
+    public static int setMinDistance(String id, float value, Collection<ServerPlayer> targets) {
+        return setMinDistance(id, value, audience(targets));
+    }
+
+    public static int setMinDistance(String id, float value, AuralisAudience audience) {
+        return AuralisServerManager.setMinDistance(audience, id, value);
+    }
+
+    public static int setMaxDistance(String id, float value, Collection<ServerPlayer> targets) {
+        return setMaxDistance(id, value, audience(targets));
+    }
+
+    public static int setMaxDistance(String id, float value, AuralisAudience audience) {
+        return AuralisServerManager.setMaxDistance(audience, id, value);
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Server-clock tweens and bindings                                       */
+    /* --------------------------------------------------------------------- */
+
+    public static int tween(
+            String id,
+            TweenControlPacket.Property property,
+            double value,
+            float duration,
+            Collection<ServerPlayer> targets
+    ) {
+        return tween(id, property, value, duration, EasingStyle.LINEAR, EasingDirection.OUT, audience(targets));
+    }
+
+    public static int tween(
+            String id,
+            TweenControlPacket.Property property,
+            double value,
+            float duration,
+            EasingStyle style,
+            EasingDirection direction,
+            Collection<ServerPlayer> targets
+    ) {
+        return tween(id, property, value, duration, style, direction, audience(targets));
+    }
+
+    public static int tween(
+            String id,
+            TweenControlPacket.Property property,
+            double value,
+            float duration,
+            EasingStyle style,
+            EasingDirection direction,
+            AuralisAudience audience
+    ) {
+        return AuralisServerManager.tween(
+                audience, id, property, value, 0.0, 0.0, duration, style, direction
         );
-
-        return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家发送停止指令 (id=" + id + ")");
     }
 
-    public static int setVolume(String id, float volume, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_VOLUME,
-                id,
-                new ResourceLocation("minecraft:empty"),
-                volume, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+    public static int tweenPosition(
+            String id,
+            Vec3 target,
+            float duration,
+            Collection<ServerPlayer> targets
+    ) {
+        return tweenPosition(
+                id, target, duration, EasingStyle.LINEAR, EasingDirection.OUT, audience(targets)
         );
-
-        return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家设置音量 (id=" + id + ", volume=" + volume + ")");
     }
 
-    public static int setPitch(String id, float pitch, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
+    public static int tweenPosition(
+            String id,
+            Vec3 target,
+            float duration,
+            EasingStyle style,
+            EasingDirection direction,
+            Collection<ServerPlayer> targets
+    ) {
+        return tweenPosition(id, target, duration, style, direction, audience(targets));
+    }
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_PITCH,
-                id,
-                new ResourceLocation("minecraft:empty"),
-                0f, pitch, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+    public static int tweenPosition(
+            String id,
+            Vec3 target,
+            float duration,
+            EasingStyle style,
+            EasingDirection direction,
+            AuralisAudience audience
+    ) {
+        return AuralisServerManager.tween(
+                audience, id, TweenControlPacket.Property.POSITION,
+                target.x, target.y, target.z, duration, style, direction
         );
-
-        return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家设置音高 (id=" + id + ", pitch=" + pitch + ")");
-    }
-
-    public static int setPosition(String id, Vec3 pos, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_POSITION,
-                id,
-                new ResourceLocation("minecraft:empty"),
-                0f, 0f, 0f,
-                false,
-                pos.x, pos.y, pos.z,
-                false,
-                0,
-                0.1f,
-                0.1f
-        );
-
-        return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家设置位置 (id=" + id + ", pos=" + pos.x + "," + pos.y + "," + pos.z + ")");
-    }
-
-    public static int setStatic(String id, boolean isStatic, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_STATIC,
-                id,
-                new ResourceLocation("minecraft:empty"),
-                0f, 0f, 0f,
-                isStatic,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
-        );
-
-        return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家设置静态模式 (id=" + id + ", static=" + isStatic + ")");
-    }
-
-    public static int setLooping(String id, boolean looping, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_LOOPING,
-                id,
-                new ResourceLocation("minecraft:empty"),
-                0f, 0f, 0f,
-                looping,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
-        );
-
-        return sendPacketToPlayers(packet, targets, "[GFBS Auralis] 已向 %d 名玩家设置循环 (id=" + id + ", looping=" + looping + ")");
-    }
-
-    public static int tween(String id, TweenControlPacket.Property property, double value, float duration, Collection<ServerPlayer> targets) {
-        return tween(id, property, value, duration, EasingStyle.LINEAR, EasingDirection.OUT, targets);
-    }
-
-    public static int tween(String id, TweenControlPacket.Property property, double value, float duration,
-                            EasingStyle style, EasingDirection dir, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-
-        TweenControlPacket packet = new TweenControlPacket(
-                property, id,
-                value, 0d, 0d,
-                duration,
-                style, dir
-        );
-
-        return sendTweenPacket(packet, targets,
-                "[GFBS Auralis] 已向 %d 名玩家发送渐变指令 (id=" + id + ", prop=" + property.name() + ", target=" + value + ", duration=" + duration + "s)");
-    }
-
-    public static int tweenPosition(String id, Vec3 targetPos, float duration, Collection<ServerPlayer> targets) {
-        return tweenPosition(id, targetPos, duration, EasingStyle.LINEAR, EasingDirection.OUT, targets);
-    }
-
-    public static int tweenPosition(String id, Vec3 targetPos, float duration,
-                                    EasingStyle style, EasingDirection dir, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-
-        TweenControlPacket packet = new TweenControlPacket(
-                TweenControlPacket.Property.POSITION, id,
-                targetPos.x, targetPos.y, targetPos.z,
-                duration,
-                style, dir
-        );
-
-        return sendTweenPacket(packet, targets,
-                "[GFBS Auralis] 已向 %d 名玩家发送位置渐变指令 (id=" + id + ", target=" + targetPos.x + "," + targetPos.y + "," + targetPos.z + ", duration=" + duration + "s)");
     }
 
     public static int bindEntity(String id, int entityId, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
+        return bindEntity(id, entityId, ZERO_UUID, audience(targets));
+    }
 
-        BindControlPacket packet = BindControlPacket.bindEntity(id, entityId, new java.util.UUID(0, 0));
-        return sendBindPacket(packet, targets);
+    public static int bindEntity(
+            String id,
+            int entityId,
+            UUID entityUuid,
+            AuralisAudience audience
+    ) {
+        return AuralisServerManager.bindEntity(audience, id, entityId, entityUuid);
     }
 
     public static int bindBlock(String id, BlockPos pos, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
+        return bindBlock(id, pos, audience(targets));
+    }
 
-        BindControlPacket packet = BindControlPacket.bindBlock(id, pos);
-        return sendBindPacket(packet, targets);
+    public static int bindBlock(String id, BlockPos pos, AuralisAudience audience) {
+        return AuralisServerManager.bindBlock(audience, id, pos);
     }
 
     public static int unbind(String id, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-
-        BindControlPacket packet = BindControlPacket.unbind(id);
-        return sendBindPacket(packet, targets);
+        return unbind(id, audience(targets));
     }
+
+    public static int unbind(String id, AuralisAudience audience) {
+        return AuralisServerManager.unbind(audience, id);
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Bus state                                                              */
+    /* --------------------------------------------------------------------- */
 
     public static int setBus(String soundId, String busName, Collection<ServerPlayer> targets) {
-        return sendBusPacket(
-                new BusControlPacket(BusControlPacket.Action.SET_INSTANCE_BUS, soundId, busName, 0f, false),
-                targets
-        );
+        return setBus(soundId, busName, audience(targets));
     }
 
-    public static int createBus(String busName, String parentName, Collection<ServerPlayer> targets) {
-        return sendBusPacket(
-                new BusControlPacket(BusControlPacket.Action.CREATE_BUS, busName, parentName, 0f, false),
-                targets
-        );
+    public static int setBus(String soundId, String busName, AuralisAudience audience) {
+        return AuralisServerManager.setBus(audience, soundId, busName);
     }
 
-    public static int removeBus(String busName, Collection<ServerPlayer> targets) {
-        return sendBusPacket(
-                new BusControlPacket(BusControlPacket.Action.REMOVE_BUS, busName, "Master", 0f, false),
-                targets
-        );
+    public static int createBus(String name, String parent, Collection<ServerPlayer> targets) {
+        return createBus(name, parent, audience(targets));
     }
 
-    public static int setBusParent(String busName, String parentName, Collection<ServerPlayer> targets) {
-        return sendBusPacket(
-                new BusControlPacket(BusControlPacket.Action.SET_PARENT, busName, parentName, 0f, false),
-                targets
-        );
+    public static int createBus(String name, String parent, AuralisAudience audience) {
+        return bus(new BusControlPacket(BusControlPacket.Action.CREATE_BUS, name, parent, 0f, false), audience);
     }
 
-    public static int setBusVolume(String busName, float volume, Collection<ServerPlayer> targets) {
-        return sendBusPacket(
-                new BusControlPacket(BusControlPacket.Action.SET_VOLUME, busName, "Master", volume, false),
-                targets
-        );
+    public static int removeBus(String name, Collection<ServerPlayer> targets) {
+        return removeBus(name, audience(targets));
     }
 
-    public static int setBusMuted(String busName, boolean muted, Collection<ServerPlayer> targets) {
-        return sendBusFlag(BusControlPacket.Action.SET_MUTED, busName, muted, targets);
+    public static int removeBus(String name, AuralisAudience audience) {
+        return bus(new BusControlPacket(BusControlPacket.Action.REMOVE_BUS, name, "Master", 0f, false), audience);
     }
 
-    public static int setBusSolo(String busName, boolean solo, Collection<ServerPlayer> targets) {
-        return sendBusFlag(BusControlPacket.Action.SET_SOLO, busName, solo, targets);
+    public static int setBusParent(String name, String parent, Collection<ServerPlayer> targets) {
+        return setBusParent(name, parent, audience(targets));
     }
 
-    public static int setBusEffectsBypassed(String busName, boolean bypassed, Collection<ServerPlayer> targets) {
-        return sendBusFlag(BusControlPacket.Action.SET_EFFECTS_BYPASSED, busName, bypassed, targets);
+    public static int setBusParent(String name, String parent, AuralisAudience audience) {
+        return bus(new BusControlPacket(BusControlPacket.Action.SET_PARENT, name, parent, 0f, false), audience);
     }
 
-    private static int sendBusFlag(
-            BusControlPacket.Action action,
-            String busName,
-            boolean value,
-            Collection<ServerPlayer> targets
-    ) {
-        return sendBusPacket(new BusControlPacket(action, busName, "Master", 0f, value), targets);
+    public static int setBusVolume(String name, float value, Collection<ServerPlayer> targets) {
+        return setBusVolume(name, value, audience(targets));
     }
 
-    private static int sendBusPacket(BusControlPacket packet, Collection<ServerPlayer> targets) {
-        if (targets == null) return 0;
-        int sent = 0;
-        for (ServerPlayer player : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
-            sent++;
-        }
-        return sent;
+    public static int setBusVolume(String name, float value, AuralisAudience audience) {
+        return bus(new BusControlPacket(BusControlPacket.Action.SET_VOLUME, name, "Master", value, false), audience);
     }
 
-    private static int sendBindPacket(BindControlPacket packet, Collection<ServerPlayer> targets) {
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-        }
-        return 1;
+    public static int setBusMuted(String name, boolean value, Collection<ServerPlayer> targets) {
+        return setBusMuted(name, value, audience(targets));
     }
 
-    private static int sendTweenPacket(TweenControlPacket packet, Collection<ServerPlayer> targets, String message) {
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
-        return 1;
+    public static int setBusMuted(String name, boolean value, AuralisAudience audience) {
+        return bus(new BusControlPacket(BusControlPacket.Action.SET_MUTED, name, "Master", 0f, value), audience);
     }
 
-    private static int sendPacketToPlayers(SoundControlPacket packet, Collection<ServerPlayer> targets, String successMessage) {
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
+    public static int setBusSolo(String name, boolean value, Collection<ServerPlayer> targets) {
+        return setBusSolo(name, value, audience(targets));
+    }
 
-        int finalSent = sent;
+    public static int setBusSolo(String name, boolean value, AuralisAudience audience) {
+        return bus(new BusControlPacket(BusControlPacket.Action.SET_SOLO, name, "Master", 0f, value), audience);
+    }
 
-        return 1;
+    public static int setBusEffectsBypassed(String name, boolean value, Collection<ServerPlayer> targets) {
+        return setBusEffectsBypassed(name, value, audience(targets));
+    }
+
+    public static int setBusEffectsBypassed(String name, boolean value, AuralisAudience audience) {
+        return bus(new BusControlPacket(
+                BusControlPacket.Action.SET_EFFECTS_BYPASSED, name, "Master", 0f, value
+        ), audience);
+    }
+
+    private static int bus(BusControlPacket packet, AuralisAudience audience) {
+        return AuralisServerManager.applyBusControl(audience, packet);
+    }
+
+    private static AuralisAudience audience(Collection<ServerPlayer> targets) {
+        if (targets == null) return new AuralisAudience.Players(java.util.Set.of());
+        return AuralisAudience.players(targets);
     }
 }

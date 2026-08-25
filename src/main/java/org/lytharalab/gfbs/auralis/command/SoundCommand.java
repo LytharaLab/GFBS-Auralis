@@ -23,12 +23,11 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.network.PacketDistributor;
-import org.lytharalab.gfbs.auralis.network.BindControlPacket;
+import org.lytharalab.gfbs.auralis.api.AuralisAudience;
+import org.lytharalab.gfbs.auralis.api.AuralisServerApi;
 import org.lytharalab.gfbs.auralis.network.BusControlPacket;
-import org.lytharalab.gfbs.auralis.network.NetworkHandler;
-import org.lytharalab.gfbs.auralis.network.SoundControlPacket;
 import org.lytharalab.gfbs.auralis.network.TweenControlPacket;
+import org.lytharalab.gfbs.auralis.server.AuralisServerManager;
 import org.lytharalab.gfbs.auralis.tween.EasingDirection;
 import org.lytharalab.gfbs.auralis.tween.EasingStyle;
 
@@ -282,6 +281,13 @@ public final class SoundCommand {
                                 .then(Commands.argument("targets", EntityArgument.players())
                                         .executes(ctx -> pauseSound(ctx, StringArgumentType.getString(ctx, "id"), EntityArgument.getPlayers(ctx, "targets"))))))
 
+                // /auralis resume <id> [targets]
+                .then(Commands.literal("resume")
+                        .then(Commands.argument("id", StringArgumentType.string())
+                                .executes(ctx -> resumeSound(ctx, StringArgumentType.getString(ctx, "id"), null))
+                                .then(Commands.argument("targets", EntityArgument.players())
+                                        .executes(ctx -> resumeSound(ctx, StringArgumentType.getString(ctx, "id"), EntityArgument.getPlayers(ctx, "targets"))))))
+
                 // /auralis stop <id> [targets]
                 .then(Commands.literal("stop")
                         .then(Commands.argument("id", StringArgumentType.string())
@@ -385,25 +391,18 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                isStreamed ? SoundControlPacket.Action.STREAMED_PLAY : SoundControlPacket.Action.PLAY,
-                id,
-                soundEventId,
-                volume,
-                pitch,
-                speed,
-                isStatic,
-                pos.x, pos.y, pos.z,
-                looping,
-                priority,
-                minDistance,
-                maxDistance
-        );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
+        AuralisAudience audience = authoritativeAudience(ctx, targets, explicitTargets);
+        int sent;
+        if (isStreamed) {
+            sent = AuralisServerApi.playStreamedSound(
+                    id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                    priority, minDistance, maxDistance, audience
+            );
+        } else {
+            sent = AuralisServerApi.playSound(
+                    id, soundEventId, volume, pitch, speed, isStatic, pos, looping,
+                    priority, minDistance, maxDistance, audience
+            );
         }
 
         int finalSent = sent;
@@ -419,24 +418,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.PAUSE,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.pauseSound(
+                id, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
 
         int finalSent = sent;
         ctx.getSource().sendSuccess(
@@ -446,28 +430,29 @@ public final class SoundCommand {
         return 1;
     }
 
+    private static int resumeSound(CommandContext<CommandSourceStack> ctx, String id, Collection<ServerPlayer> explicitTargets) {
+        Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
+        if (targets == null) return 0;
+
+        int sent = AuralisServerApi.resumeSound(
+                id, authoritativeAudience(ctx, targets, explicitTargets)
+        );
+        ctx.getSource().sendSuccess(
+                () -> Component.literal(
+                        "[GFBS Auralis] 已向 " + sent + " 名玩家发送继续播放指令 (id=" + id + ")"
+                ),
+                false
+        );
+        return 1;
+    }
+
     private static int stopSound(CommandContext<CommandSourceStack> ctx, String id, Collection<ServerPlayer> explicitTargets) {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.STOP,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.stopSound(
+                id, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
 
         int finalSent = sent;
         ctx.getSource().sendSuccess(
@@ -481,24 +466,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_VOLUME,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                volume, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.setVolume(
+                id, volume, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置音量 (id=" + id + ", volume=" + volume + ")"), false);
         return 1;
@@ -508,24 +478,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_PITCH,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, pitch, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.setPitch(
+                id, pitch, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置音高 (id=" + id + ", pitch=" + pitch + ")"), false);
         return 1;
@@ -535,24 +490,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_SPEED,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, speed,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.setSpeed(
+                id, speed, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置速度 (id=" + id + ", speed=" + speed + ")"), false);
         return 1;
@@ -562,24 +502,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_POSITION,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                false,
-                pos.x, pos.y, pos.z,
-                false,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.setPosition(
+                id, pos, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置位置 (id=" + id + ", pos=" + pos.x + "," + pos.y + "," + pos.z + ")"), false);
         return 1;
@@ -589,24 +514,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_STATIC,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                isStatic,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.setStatic(
+                id, isStatic, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置静态模式 (id=" + id + ", static=" + isStatic + ")"), false);
         return 1;
@@ -616,24 +526,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_LOOPING,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                looping,
-                0,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.setLooping(
+                id, looping, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置循环 (id=" + id + ", looping=" + looping + ")"), false);
         return 1;
@@ -643,24 +538,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_PRIORITY,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                priority,
-                0.1f,
-                0.1f
+        int sent = AuralisServerApi.setPriority(
+                id, priority, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置优先级 (id=" + id + ", priority=" + priority + ")"), false);
         return 1;
@@ -670,24 +550,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_MIN_DISTANCE,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                minDistance,
-                0.1f
+        int sent = AuralisServerApi.setMinDistance(
+                id, minDistance, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置最小距离 (id=" + id + ", minDistance=" + minDistance + ")"), false);
         return 1;
@@ -697,24 +562,9 @@ public final class SoundCommand {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
 
-        SoundControlPacket packet = new SoundControlPacket(
-                SoundControlPacket.Action.SET_MAX_DISTANCE,
-                id,
-                new ResourceLocation("minecraft", "empty"),
-                0f, 0f, 0f,
-                false,
-                0d, 0d, 0d,
-                false,
-                0,
-                0.1f,
-                maxDistance
+        int sent = AuralisServerApi.setMaxDistance(
+                id, maxDistance, authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置最大距离 (id=" + id + ", maxDistance=" + maxDistance + ")"), false);
         return 1;
@@ -800,11 +650,9 @@ public final class SoundCommand {
     ) {
         Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
         if (targets == null) return 0;
-        int sent = 0;
-        for (ServerPlayer player : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
-            sent++;
-        }
+        int sent = AuralisServerManager.applyBusControl(
+                authoritativeAudience(ctx, targets, explicitTargets), packet
+        );
         int finalSent = sent;
         ctx.getSource().sendSuccess(
                 () -> Component.literal("[GFBS Auralis] " + detail + "（" + finalSent + " 名玩家）"),
@@ -825,18 +673,10 @@ public final class SoundCommand {
         EasingStyle easingStyle = parseEasingStyle(easingStyleStr);
         EasingDirection easingDirection = parseEasingDirection(easingDirectionStr);
 
-        TweenControlPacket packet = new TweenControlPacket(
-                property, id,
-                value, 0d, 0d,
-                duration,
-                easingStyle, easingDirection
+        int sent = AuralisServerApi.tween(
+                id, property, value, duration, easingStyle, easingDirection,
+                authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
 
         int finalSent = sent;
         ctx.getSource().sendSuccess(
@@ -858,18 +698,10 @@ public final class SoundCommand {
         EasingStyle easingStyle = parseEasingStyle(easingStyleStr);
         EasingDirection easingDirection = parseEasingDirection(easingDirectionStr);
 
-        TweenControlPacket packet = new TweenControlPacket(
-                TweenControlPacket.Property.POSITION, id,
-                targetPos.x, targetPos.y, targetPos.z,
-                duration,
-                easingStyle, easingDirection
+        int sent = AuralisServerApi.tweenPosition(
+                id, targetPos, duration, easingStyle, easingDirection,
+                authoritativeAudience(ctx, targets, explicitTargets)
         );
-
-        int sent = 0;
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-            sent++;
-        }
 
         int finalSent = sent;
         ctx.getSource().sendSuccess(
@@ -891,6 +723,23 @@ public final class SoundCommand {
             ctx.getSource().sendFailure(Component.literal("[GFBS Auralis] 该命令来源不是玩家（如命令方块/控制台），必须指定 targets 参数（例如 @p/@a/玩家名）。"));
             return null;
         }
+    }
+
+    private static AuralisAudience authoritativeAudience(
+            CommandContext<CommandSourceStack> ctx,
+            Collection<ServerPlayer> resolvedTargets,
+            Collection<ServerPlayer> explicitTargets
+    ) {
+        if (explicitTargets != null) {
+            for (var node : ctx.getNodes()) {
+                if (!"targets".equals(node.getNode().getName())) continue;
+                String selector = ctx.getInput().substring(
+                        node.getRange().getStart(), node.getRange().getEnd()
+                );
+                if ("@a".equals(selector)) return AuralisAudience.all();
+            }
+        }
+        return AuralisAudience.players(resolvedTargets);
     }
 
     private static String tryGetString(CommandContext<CommandSourceStack> ctx, String name) {
@@ -924,11 +773,15 @@ public final class SoundCommand {
         net.minecraft.world.entity.Entity target = EntityArgument.getEntity(ctx, "target_entity");
         Collection<ServerPlayer> targets = (explicitTargets != null) ? explicitTargets : Collections.singleton(ctx.getSource().getPlayerOrException());
 
-        BindControlPacket packet = BindControlPacket.bindEntity(id, target.getId(), target.getUUID());
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-        }
-        ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已将音源 " + id + " 绑定到实体 " + target.getName().getString() + " (uuid=" + target.getUUID() + ")"), true);
+        int sent = AuralisServerApi.bindEntity(
+                id, target.getId(), target.getUUID(),
+                authoritativeAudience(ctx, targets, explicitTargets)
+        );
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                "[GFBS Auralis] 已为 " + sent + " 名玩家将音源 " + id
+                        + " 绑定到实体 " + target.getName().getString()
+                        + " (uuid=" + target.getUUID() + ")"
+        ), true);
         return 1;
     }
 
@@ -937,11 +790,13 @@ public final class SoundCommand {
         net.minecraft.core.BlockPos pos = BlockPosArgument.getLoadedBlockPos(ctx, "pos");
         Collection<ServerPlayer> targets = (explicitTargets != null) ? explicitTargets : Collections.singleton(ctx.getSource().getPlayerOrException());
 
-        BindControlPacket packet = BindControlPacket.bindBlock(id, pos);
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-        }
-        ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已将音源 " + id + " 绑定到方块位置 " + pos.getX() + "," + pos.getY() + "," + pos.getZ()), true);
+        int sent = AuralisServerApi.bindBlock(
+                id, pos, authoritativeAudience(ctx, targets, explicitTargets)
+        );
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                "[GFBS Auralis] 已为 " + sent + " 名玩家将音源 " + id
+                        + " 绑定到方块位置 " + pos.getX() + "," + pos.getY() + "," + pos.getZ()
+        ), true);
         return 1;
     }
 
@@ -949,11 +804,12 @@ public final class SoundCommand {
         String id = StringArgumentType.getString(ctx, "id");
         Collection<ServerPlayer> targets = (explicitTargets != null) ? explicitTargets : Collections.singleton(ctx.getSource().getPlayerOrException());
 
-        BindControlPacket packet = BindControlPacket.unbind(id);
-        for (ServerPlayer p : targets) {
-            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> p), packet);
-        }
-        ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已解除音源 " + id + " 的绑定"), true);
+        int sent = AuralisServerApi.unbind(
+                id, authoritativeAudience(ctx, targets, explicitTargets)
+        );
+        ctx.getSource().sendSuccess(() -> Component.literal(
+                "[GFBS Auralis] 已为 " + sent + " 名玩家解除音源 " + id + " 的绑定"
+        ), true);
         return 1;
     }
 

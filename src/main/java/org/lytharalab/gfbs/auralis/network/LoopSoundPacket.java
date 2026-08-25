@@ -25,6 +25,7 @@ import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkEvent;
+import org.lytharalab.gfbs.auralis.GFBsAuralisConfig;
 import org.lytharalab.gfbs.auralis.server.AuralisServerManager;
 
 import java.util.function.Supplier;
@@ -52,7 +53,7 @@ public class LoopSoundPacket {
     public static void handle(LoopSoundPacket packet, Supplier<NetworkEvent.Context> context) {
         context.get().enqueueWork(() -> {
             ServerPlayer player = context.get().getSender();
-            if (player != null) {
+            if (player != null && GFBsAuralisConfig.SERVER.allowClientSync.get()) {
                 AuralisServerManager.setLooping(player, packet.soundId, packet.looping);
             }
         });

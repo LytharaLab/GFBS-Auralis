@@ -23,6 +23,19 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 
 The OpenAL engine and all audio-device operations run on the physical client. Install the mod on the server as well when using its commands, packets, synchronized state, entity binding, or block binding.
 
+## Server-authoritative audio synchronization
+
+Auralis now keeps server-orchestrated sounds as revisioned logical instances with server-clock playback cursors. Players who join late, reconnect, or change dimensions receive a bounded state snapshot and seek to the position already being heard by existing players. Paused state, runtime properties, Tweens, bus routing, and bindings are restored with the same timeline.
+
+- Global, dimension, and fixed-player audiences include the appropriate future joins.
+- Five initial monotonic-clock probes provide an NTP-style offset estimate; periodic probes and drift correction keep long-running music aligned.
+- Snapshot chunks are applied atomically, while per-instance revisions preserve newer deltas that arrive during assembly.
+- The server uses immutable timestamped state and one shared scheduler rather than a tick or thread per sound.
+- Audio loading remains asynchronous, and decoder/OpenAL seeks run only on the client audio worker.
+- Client-originated legacy controls are disabled unless `allowClientSync` is explicitly enabled.
+
+See [Server-authoritative audio synchronization](docs/AUDIO_SYNCHRONIZATION.md) for the runtime contract and API examples.
+
 ## 2.2.0 buses, effects, and plugins
 
 Auralis 2.2.0 adds a Godot-style hierarchical audio-bus graph, a complete OpenAL EFX layer, factory-backed custom PCM effects, and a lifecycle-managed extension system.
@@ -35,7 +48,7 @@ Auralis 2.2.0 adds a Godot-style hierarchical audio-bus graph, a complete OpenAL
 - Device EFX support and the actual auxiliary-send limit are detected at runtime. Unsupported or rejected effects are bypassed without disabling bus gain/routing or custom PCM processing.
 - Plugins can register effect factories, per-voice processor factories, event listeners, and pre-initialization entry points. Dependencies, reverse-order unload, owned-registration cleanup, and callback fault isolation are built in.
 - Plugins receive controlled execution on Auralis' active OpenAL thread, but never receive the `AuralisAL` object, its device/context handles, queue, or lifecycle controls.
-- Network protocol `3` adds bounded client-bound bus creation, routing, volume, mute, solo, bypass, and per-instance bus assignment.
+- Network protocol `4` includes bounded bus control plus server-authoritative timelines, clock calibration, idempotent deltas, and atomic late-join snapshots.
 
 See [Audio buses and effects](docs/AUDIO_BUSES_AND_EFFECTS.md) and [Plugin API 2.2](docs/PLUGIN_API_2.2.md) for the complete API contract and examples.
 
@@ -66,6 +79,8 @@ Auralis 2.1.1 separates a **logical sound instance** from a scarce physical Open
 - Audibility hysteresis and zero-gain source reset guards that prevent distant looping sounds from briefly flashing audible during listener movement/source reuse.
 - Optional HRTF initialization when supported by the active audio device.
 - Server-to-client control through commands and the `AuralisServerApi`.
+- Precise late-join, reconnect, and dimension-change synchronization for active server-authoritative instances.
+- Persistent global, dimension, and fixed-player replication audiences.
 - Runtime Tween transitions for volume, pitch, speed, position, and attenuation distances.
 - Sound instances that can follow entities or block positions.
 - Per-instance and global PCM processor hooks.
@@ -229,6 +244,7 @@ Runtime controls include:
 
 ```text
 /gfbs_auralis pause <id> [targets]
+/gfbs_auralis resume <id> [targets]
 /gfbs_auralis stop <id> [targets]
 /gfbs_auralis regulating volume <id> <value> [targets]
 /gfbs_auralis regulating pitch <id> <value> [targets]
@@ -270,6 +286,8 @@ A sound may follow an entity or block position:
 
 When the command source is a player, omitted `targets` default to that player. Command blocks and the server console must provide an explicit target selector.
 
+An exact `@a` target creates a persistent global instance, so players joining later synchronize to its current cursor. Filtered selectors remain fixed to the players selected at command execution time.
+
 ## Configuration
 
 Client audio configuration includes:
@@ -293,8 +311,9 @@ src/main/java/org/lytharalab/gfbs/auralis/
 ├── command/     Brigadier command registration and dispatch
 ├── core/        Bus compiler, EFX rack, controlled OpenAL access, events, and plugins
 ├── event/       Forge synchronization event handlers
-├── network/     Client sound, bus, binding, and Tween packets
-├── server/      Server-side sound state and synchronization
+├── network/     Client controls plus revisioned clock, delta, and snapshot packets
+├── server/      Server-authoritative logical audio runtime
+├── sync/        Client clock calibration and snapshot reconciliation
 ├── tween/       Tween service, easing, and playback state
 ├── utils/       OGG Vorbis decoding
 └── *.java       OpenAL engine, source pool, buffer cache, and client controller
