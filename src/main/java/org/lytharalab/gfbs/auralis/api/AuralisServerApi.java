@@ -26,6 +26,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 import org.lytharalab.gfbs.auralis.network.BindControlPacket;
+import org.lytharalab.gfbs.auralis.network.BusControlPacket;
 import org.lytharalab.gfbs.auralis.network.NetworkHandler;
 import org.lytharalab.gfbs.auralis.network.SoundControlPacket;
 import org.lytharalab.gfbs.auralis.network.TweenControlPacket;
@@ -265,6 +266,72 @@ public class AuralisServerApi {
 
         BindControlPacket packet = BindControlPacket.unbind(id);
         return sendBindPacket(packet, targets);
+    }
+
+    public static int setBus(String soundId, String busName, Collection<ServerPlayer> targets) {
+        return sendBusPacket(
+                new BusControlPacket(BusControlPacket.Action.SET_INSTANCE_BUS, soundId, busName, 0f, false),
+                targets
+        );
+    }
+
+    public static int createBus(String busName, String parentName, Collection<ServerPlayer> targets) {
+        return sendBusPacket(
+                new BusControlPacket(BusControlPacket.Action.CREATE_BUS, busName, parentName, 0f, false),
+                targets
+        );
+    }
+
+    public static int removeBus(String busName, Collection<ServerPlayer> targets) {
+        return sendBusPacket(
+                new BusControlPacket(BusControlPacket.Action.REMOVE_BUS, busName, "Master", 0f, false),
+                targets
+        );
+    }
+
+    public static int setBusParent(String busName, String parentName, Collection<ServerPlayer> targets) {
+        return sendBusPacket(
+                new BusControlPacket(BusControlPacket.Action.SET_PARENT, busName, parentName, 0f, false),
+                targets
+        );
+    }
+
+    public static int setBusVolume(String busName, float volume, Collection<ServerPlayer> targets) {
+        return sendBusPacket(
+                new BusControlPacket(BusControlPacket.Action.SET_VOLUME, busName, "Master", volume, false),
+                targets
+        );
+    }
+
+    public static int setBusMuted(String busName, boolean muted, Collection<ServerPlayer> targets) {
+        return sendBusFlag(BusControlPacket.Action.SET_MUTED, busName, muted, targets);
+    }
+
+    public static int setBusSolo(String busName, boolean solo, Collection<ServerPlayer> targets) {
+        return sendBusFlag(BusControlPacket.Action.SET_SOLO, busName, solo, targets);
+    }
+
+    public static int setBusEffectsBypassed(String busName, boolean bypassed, Collection<ServerPlayer> targets) {
+        return sendBusFlag(BusControlPacket.Action.SET_EFFECTS_BYPASSED, busName, bypassed, targets);
+    }
+
+    private static int sendBusFlag(
+            BusControlPacket.Action action,
+            String busName,
+            boolean value,
+            Collection<ServerPlayer> targets
+    ) {
+        return sendBusPacket(new BusControlPacket(action, busName, "Master", 0f, value), targets);
+    }
+
+    private static int sendBusPacket(BusControlPacket packet, Collection<ServerPlayer> targets) {
+        if (targets == null) return 0;
+        int sent = 0;
+        for (ServerPlayer player : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
+            sent++;
+        }
+        return sent;
     }
 
     private static int sendBindPacket(BindControlPacket packet, Collection<ServerPlayer> targets) {

@@ -1,7 +1,13 @@
 package org.lytharalab.gfbs.auralis.api.plugin;
 
 import org.lytharalab.gfbs.auralis.api.event.AuralisEventBus;
+import org.lytharalab.gfbs.auralis.api.IAuralisEngine;
+import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
+import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectFactory;
+import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectRegistry;
+import org.lytharalab.gfbs.auralis.api.openal.OpenALAccess;
 import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
+import org.lytharalab.gfbs.auralis.api.processing.AudioProcessorFactory;
 
 /**
  * 插件上下文
@@ -28,6 +34,22 @@ public interface PluginContext {
      */
     void unregisterGlobalProcessor(AudioProcessor processor);
 
+    /** Register a state-safe factory that creates one processor per voice. */
+    default void registerGlobalProcessorFactory(String id, AudioProcessorFactory factory) {
+        throw new UnsupportedOperationException("Processor factories require Auralis 2.2.0");
+    }
+
+    default void unregisterGlobalProcessorFactory(String id) {
+    }
+
+    default void registerEffectType(String typeId, AuralisEffectFactory factory) {
+        effects().register(typeId, factory);
+    }
+
+    default void unregisterEffectType(String typeId) {
+        effects().unregister(typeId);
+    }
+
     /**
      * 获取事件总线
      * <p>
@@ -37,6 +59,24 @@ public interface PluginContext {
      * @return 事件总线实例
      */
     AuralisEventBus getEventBus();
-    
-    // TODO: 添加更多功能，例如资源加载、日志记录等
+
+    default IAuralisEngine engine() {
+        throw new UnsupportedOperationException("Engine access requires Auralis 2.2.0");
+    }
+
+    default AudioBusSystem buses() {
+        throw new UnsupportedOperationException("Audio buses require Auralis 2.2.0");
+    }
+
+    default AuralisEffectRegistry effects() {
+        throw new UnsupportedOperationException("Effect registry requires Auralis 2.2.0");
+    }
+
+    default OpenALAccess openAL() {
+        throw new UnsupportedOperationException("OpenAL access requires Auralis 2.2.0");
+    }
+
+    default String pluginId() {
+        return "unknown:legacy";
+    }
 }

@@ -63,15 +63,21 @@ public class GFBsAuralis {
                             cfg.voiceVirtualizeGain.get().floatValue()
                     );
                     AuralisApi.setEngine(engine);
+                    int discoveredPlugins = engine.getPluginManager().discoverAndLoad(
+                            Thread.currentThread().getContextClassLoader()
+                    );
+                    int retriedPlugins = AuralisApi.loadRegisteredPlugins();
                     LOGGER.info(
-                            "Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={}, deviceMonoSources={}, deviceStereoSources={}, voiceMaterializeGain={}, voiceVirtualizeGain={})",
+                            "Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={}, deviceMonoSources={}, deviceStereoSources={}, voiceMaterializeGain={}, voiceVirtualizeGain={}, discoveredPlugins={}, dependencyRetries={})",
                             effectiveMaxSources,
                             configuredMaxSources,
                             reserve,
                             sourceBudget.monoSources(),
                             sourceBudget.stereoSources(),
                             cfg.voiceMaterializeGain.get(),
-                            cfg.voiceVirtualizeGain.get()
+                            cfg.voiceVirtualizeGain.get(),
+                            discoveredPlugins,
+                            retriedPlugins
                     );
                 } catch (Throwable startupFailure) {
                     LOGGER.error("GFBS-Auralis client engine initialization failed; disabling Auralis for this session", startupFailure);

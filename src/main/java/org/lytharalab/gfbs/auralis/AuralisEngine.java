@@ -20,9 +20,18 @@ import org.lwjgl.openal.AL10;
 import org.lytharalab.gfbs.auralis.api.AuralisApi;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
 import org.lytharalab.gfbs.auralis.api.IAuralisEngine;
+import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
+import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectRegistry;
+import org.lytharalab.gfbs.auralis.api.effect.AuralisEffects;
 import org.lytharalab.gfbs.auralis.api.event.SoundCreatedEvent;
-import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
+import org.lytharalab.gfbs.auralis.api.openal.OpenALAccess;
+import org.lytharalab.gfbs.auralis.api.plugin.AuralisPluginService;
 import org.lytharalab.gfbs.auralis.core.AuralisPluginManager;
+import org.lytharalab.gfbs.auralis.core.bus.AuralisBusManager;
+import org.lytharalab.gfbs.auralis.core.bus.BusMixSnapshot;
+import org.lytharalab.gfbs.auralis.core.effect.AuralisEffectRegistryImpl;
+import org.lytharalab.gfbs.auralis.core.effect.OpenALEffectRack;
+import org.lytharalab.gfbs.auralis.core.openal.OpenALAccessImpl;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +52,10 @@ public final class AuralisEngine implements IAuralisEngine {
     private final OpenALSourcePool sourcePool;
     private final SoundBufferCache bufferCache;
     private final AuralisPluginManager pluginManager;
+    private final AuralisBusManager busManager;
+    private final AuralisEffectRegistryImpl effectRegistry;
+    private final OpenALAccessImpl openALAccess;
+    private final OpenALEffectRack effectRack;
     private final AuralisVoiceManager voiceManager;
     private final float attenuationExponent;
     private final float volumeSmoothing;
@@ -97,7 +110,12 @@ public final class AuralisEngine implements IAuralisEngine {
 
         this.sourcePool = new OpenALSourcePool(al, maxSources);
         this.bufferCache = new SoundBufferCache(mc, al, streamedChunkSize, maxStreamedBytes);
-        this.pluginManager = new AuralisPluginManager();
+        this.busManager = new AuralisBusManager();
+        this.effectRegistry = new AuralisEffectRegistryImpl();
+        AuralisEffects.registerBuiltIns(effectRegistry);
+        this.openALAccess = new OpenALAccessImpl(al);
+        this.effectRack = new OpenALEffectRack(openALAccess);
+        this.pluginManager = new AuralisPluginManager(this, busManager, effectRegistry, openALAccess);
         this.voiceManager = new AuralisVoiceManager(sourcePool, voiceMaterializeGain, voiceVirtualizeGain);
         this.streamedChunkSize = streamedChunkSize;
         this.attenuationExponent = attenuationExponent;
@@ -107,6 +125,11 @@ public final class AuralisEngine implements IAuralisEngine {
     public AuralisPluginManager getPluginManager() {
         return pluginManager;
     }
+
+    @Override public AudioBusSystem buses() { return busManager; }
+    @Override public AuralisEffectRegistry effects() { return effectRegistry; }
+    @Override public AuralisPluginService plugins() { return pluginManager; }
+    @Override public OpenALAccess openAL() { return openALAccess; }
 
     /** Number of retained logical instances, including stopped reusable instances. */
     @Override
@@ -161,7 +184,9 @@ public final class AuralisEngine implements IAuralisEngine {
             if (streamed) {
                 var decoder = bufferCache.createStreamDecoder(soundPath);
                 try {
-                    inst = new AuralisSoundInstanceImpl(al, decoder, streamedChunkSize, bufferCache, sourcePool);
+                    inst = new AuralisSoundInstanceImpl(
+                            al, decoder, streamedChunkSize, bufferCache, sourcePool, busManager, effectRack
+                    );
                 } catch (Throwable constructionFailure) {
                     decoder.close();
                     throw constructionFailure;
@@ -171,7 +196,7 @@ public final class AuralisEngine implements IAuralisEngine {
                 if (bufferId == -1) {
                     throw new RuntimeException("Failed to acquire valid buffer for sound: " + soundPath);
                 }
-                inst = new AuralisSoundInstanceImpl(al, bufferId, bufferCache, sourcePool);
+                inst = new AuralisSoundInstanceImpl(al, bufferId, bufferCache, sourcePool, busManager, effectRack);
             }
 
             synchronized (lifecycleLock) {
@@ -205,11 +230,7 @@ public final class AuralisEngine implements IAuralisEngine {
                         .thenApply(decoder -> {
                             try {
                                 return new AuralisSoundInstanceImpl(
-                                        al,
-                                        decoder,
-                                        streamedChunkSize,
-                                        bufferCache,
-                                        sourcePool
+                                        al, decoder, streamedChunkSize, bufferCache, sourcePool, busManager, effectRack
                                 );
                             } catch (RuntimeException | Error constructionFailure) {
                                 decoder.close();
@@ -224,7 +245,9 @@ public final class AuralisEngine implements IAuralisEngine {
                                 throw new RuntimeException("Failed to acquire valid buffer for sound: " + soundPath);
                             }
                             try {
-                                return new AuralisSoundInstanceImpl(al, bufferId, bufferCache, sourcePool);
+                                return new AuralisSoundInstanceImpl(
+                                        al, bufferId, bufferCache, sourcePool, busManager, effectRack
+                                );
                             } catch (RuntimeException | Error constructionFailure) {
                                 bufferCache.releaseBuffer(bufferId);
                                 throw constructionFailure;
@@ -277,9 +300,7 @@ public final class AuralisEngine implements IAuralisEngine {
     }
 
     private void configureNewInstance(AuralisSoundInstanceImpl inst, SoundEvent soundEvent) {
-        for (AudioProcessor processor : pluginManager.getGlobalProcessors()) {
-            inst.addProcessor(processor);
-        }
+        inst.replaceGlobalProcessors(pluginManager.createGlobalProcessors(), pluginManager.getProcessorRevision());
         pluginManager.getEventBus().post(new SoundCreatedEvent(inst, soundEvent));
     }
 
@@ -341,6 +362,19 @@ public final class AuralisEngine implements IAuralisEngine {
 
         // Use a stable snapshot for this frame. Async creation may mutate the map.
         List<AuralisSoundInstanceImpl> snapshot = new ArrayList<>(instances.values());
+        BusMixSnapshot busMix = busManager.snapshot();
+        long globalProcessorRevision = pluginManager.getProcessorRevision();
+        for (AuralisSoundInstanceImpl inst : snapshot) {
+            inst.refreshBusRoute(busMix.route(inst.getBus()));
+            if (inst.getGlobalProcessorRevision() != globalProcessorRevision) {
+                inst.replaceGlobalProcessors(pluginManager.createGlobalProcessors(), globalProcessorRevision);
+            }
+            inst.refreshStaticProcessorBuffer();
+        }
+
+        // Effect objects/slots are updated once per bus snapshot, never once per
+        // voice. This task is ordered before materialization and source updates.
+        al.submit(() -> effectRack.syncOnALThread(busMix));
 
         // Queue the listener update before any materialization. materializePhysicalVoice()
         // uses executeBlocking, so the OpenAL queue ordering guarantees a newly started
@@ -426,6 +460,20 @@ public final class AuralisEngine implements IAuralisEngine {
         }
         instances.clear();
 
+        // Voices are quiescent before plugin callbacks release processor/effect
+        // dependencies. The OpenAL context remains available during onDisable.
+        try {
+            pluginManager.shutdown();
+        } catch (Throwable failure) {
+            GFBsAuralis.LOGGER.warn("Failed to shut down an Auralis plugin cleanly", failure);
+        }
+
+        try {
+            effectRack.close();
+        } catch (Throwable failure) {
+            GFBsAuralis.LOGGER.warn("Failed to close the Auralis effect rack", failure);
+        }
+
         try {
             sourcePool.close();
         } catch (Throwable failure) {
@@ -441,9 +489,10 @@ public final class AuralisEngine implements IAuralisEngine {
         }
 
         try {
-            pluginManager.shutdown();
+            // Barrier behind all effect/buffer deletions before context teardown.
+            al.executeBlocking(() -> { });
         } catch (Throwable failure) {
-            GFBsAuralis.LOGGER.warn("Failed to shut down an Auralis plugin cleanly", failure);
+            GFBsAuralis.LOGGER.debug("OpenAL shutdown barrier was unavailable: {}", failure.getMessage());
         } finally {
             pendingCreations.clear();
             AuralisApi.clearEngine(this);
@@ -461,7 +510,7 @@ public final class AuralisEngine implements IAuralisEngine {
     }
 
     private AuralisSoundInstanceImpl createFallbackInstance() {
-        return new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool);
+        return new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool, busManager, effectRack);
     }
 
     private void cleanupFailedCreation(@Nullable AuralisSoundInstanceImpl inst, Throwable originalFailure) {

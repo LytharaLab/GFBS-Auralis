@@ -15,13 +15,29 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 
 | Component | Version |
 | --- | --- |
-| GFBS: Auralis | `2.1.1` |
+| GFBS: Auralis | `2.2.0` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.13` |
 | Java | `17` |
 | Mod ID | `gfbs_auralis` |
 
 The OpenAL engine and all audio-device operations run on the physical client. Install the mod on the server as well when using its commands, packets, synchronized state, entity binding, or block binding.
+
+## 2.2.0 buses, effects, and plugins
+
+Auralis 2.2.0 adds a Godot-style hierarchical audio-bus graph, a complete OpenAL EFX layer, factory-backed custom PCM effects, and a lifecycle-managed extension system.
+
+- Every voice routes to `Master` or a named child bus. Buses can route through any cycle-checked parent depth.
+- Volume, mute, solo, local effect bypass, reparenting, removal, immutable route inspection, and real-time server control are supported.
+- Effects are ordered from the voice's child bus toward `Master`. Custom PCM effects execute as a serial DSP chain in that order.
+- All 13 standard OpenAL EFX 1.0 effects and all three standard filters are exposed with typed, range-clamped parameters.
+- Native effect objects, auxiliary slots, and filters are shared across routed sources; unchanged bus snapshots perform no EFX rebuild work.
+- Device EFX support and the actual auxiliary-send limit are detected at runtime. Unsupported or rejected effects are bypassed without disabling bus gain/routing or custom PCM processing.
+- Plugins can register effect factories, per-voice processor factories, event listeners, and pre-initialization entry points. Dependencies, reverse-order unload, owned-registration cleanup, and callback fault isolation are built in.
+- Plugins receive controlled execution on Auralis' active OpenAL thread, but never receive the `AuralisAL` object, its device/context handles, queue, or lifecycle controls.
+- Network protocol `3` adds bounded client-bound bus creation, routing, volume, mute, solo, bypass, and per-instance bus assignment.
+
+See [Audio buses and effects](docs/AUDIO_BUSES_AND_EFFECTS.md) and [Plugin API 2.2](docs/PLUGIN_API_2.2.md) for the complete API contract and examples.
 
 ## 2.1.1 logical voice virtualization
 
@@ -53,7 +69,9 @@ Auralis 2.1.1 separates a **logical sound instance** from a scarce physical Open
 - Runtime Tween transitions for volume, pitch, speed, position, and attenuation distances.
 - Sound instances that can follow entities or block positions.
 - Per-instance and global PCM processor hooks.
-- Plugin lifecycle, event bus, and sound-created events for extensions.
+- Hierarchical audio buses with volume, mute, solo, effect bypass, and live routing.
+- Complete OpenAL EFX effects/filters plus third-party PCM and source-level effects.
+- Dependency-aware plugin lifecycle, owned registrations, event bus, and controlled OpenAL access.
 - Client cleanup on logout, shutdown, resource release, and engine termination.
 
 ## Installation
@@ -164,6 +182,31 @@ Use `AuralisApi.createStreamed(...)` for chunked streamed playback. Asynchronous
 
 `setStatic(true)` creates a listener-relative sound without world-distance attenuation. Use `setStatic(false)` with `setPosition(...)` for a positional world sound.
 
+### Bus and native-effect quick start
+
+Create the bus before assigning voices to it:
+
+```java
+import org.lytharalab.gfbs.auralis.api.AuralisApi;
+import org.lytharalab.gfbs.auralis.api.effect.AuralisEffects;
+import org.lytharalab.gfbs.auralis.api.effect.EfxParameter;
+
+var buses = AuralisApi.buses();
+var ambience = buses.createBus("Ambience");
+var reactor = buses.createBus("Reactor", "Ambience")
+        .setVolumeDb(-3.0f);
+
+var reverb = AuralisEffects.reverb("example:reactor_reverb")
+        .setFloat(EfxParameter.REVERB_DECAY_TIME, 2.8f)
+        .setFloat(EfxParameter.REVERB_GAIN, 0.4f)
+        .setWet(0.35f);
+
+reactor.addEffect(reverb);
+instance.setBus("Reactor");
+```
+
+`AudioBusSystem.view(name)` returns the effective gain, audibility, route to `Master`, ordered effects, and compiled revision for diagnostics or management UIs.
+
 ## Command control
 
 All commands require permission level `2` and begin with `/gfbs_auralis`.
@@ -196,6 +239,19 @@ Runtime controls include:
 /gfbs_auralis regulating priority <id> <value> [targets]
 /gfbs_auralis regulating min-distance <id> <value> [targets]
 /gfbs_auralis regulating max-distance <id> <value> [targets]
+/gfbs_auralis regulating bus <id> <bus> [targets]
+```
+
+Manage client bus layouts from the server:
+
+```text
+/gfbs_auralis bus create <bus> <parent> [targets]
+/gfbs_auralis bus remove <bus> [targets]
+/gfbs_auralis bus parent <bus> <parent> [targets]
+/gfbs_auralis bus volume <bus> <0..16> [targets]
+/gfbs_auralis bus mute <bus> <true|false> [targets]
+/gfbs_auralis bus solo <bus> <true|false> [targets]
+/gfbs_auralis bus bypass-effects <bus> <true|false> [targets]
 ```
 
 Tween controls support `volume`, `pitch`, `speed`, `position`, `min-distance`, and `max-distance`:
@@ -233,11 +289,11 @@ Changing source limits, streaming limits, or HRTF settings may require a client 
 
 ```text
 src/main/java/org/lytharalab/gfbs/auralis/
-├── api/         Public engine, sound-instance, event, plugin, and processor APIs
+├── api/         Public engine, bus, effect, OpenAL, plugin, event, and processor APIs
 ├── command/     Brigadier command registration and dispatch
-├── core/        Event bus and plugin manager implementations
+├── core/        Bus compiler, EFX rack, controlled OpenAL access, events, and plugins
 ├── event/       Forge synchronization event handlers
-├── network/     Client control, binding, and Tween packets
+├── network/     Client sound, bus, binding, and Tween packets
 ├── server/      Server-side sound state and synchronization
 ├── tween/       Tween service, easing, and playback state
 ├── utils/       OGG Vorbis decoding
