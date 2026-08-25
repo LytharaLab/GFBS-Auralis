@@ -26,8 +26,6 @@ import net.minecraftforge.fml.common.Mod;
 import org.lwjgl.openal.*;
 import org.lwjgl.system.MemoryStack;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.IntBuffer;
 import java.util.Objects;
 import java.util.concurrent.*;
@@ -46,59 +44,15 @@ public final class AuralisAL implements AutoCloseable {
     public static final AtomicReference<AuralisAL> GLOBAL = new AtomicReference<>(null);
     private static final int ALC_MONO_SOURCES_ATTR = 0x1010;
     private static final int ALC_STEREO_SOURCES_ATTR = 0x1011;
+    private static final long STOP_TIMEOUT_SECONDS = 15L;
+    private static final int MAX_QUEUED_TASKS = 16_384;
 
     private static final class AlcExt {
-        static final boolean HAS_THREAD_LOCAL_CONTEXT;
-        static final Method ALC_SET_THREAD_CONTEXT;
-        static final int ALC_HRTF_SOFT_ATTR;
-
-        static {
-            Method setThreadCtx = null;
-            boolean hasTlc = false;
-
-            int hrtfAttr = 0;
-
-            String[] tlcClassCandidates = new String[] {
-                    "org.lwjgl.openal.ALC_EXT_thread_local_context",
-                    "org.lwjgl.openal.ALCEXTThreadLocalContext"
-            };
-            for (String cn : tlcClassCandidates) {
-                try {
-                    Class<?> c = Class.forName(cn);
-                    setThreadCtx = c.getMethod("alcSetThreadContext", long.class);
-                    hasTlc = true;
-                    break;
-                } catch (Throwable ignore) {
-                }
-            }
-
-            String[] hrtfClassCandidates = new String[] {
-                    "org.lwjgl.openal.ALC_SOFT_HRTF",
-                    "org.lwjgl.openal.ALCSOFTHRTF"
-            };
-            for (String cn : hrtfClassCandidates) {
-                try {
-                    Class<?> c = Class.forName(cn);
-                    Field f = c.getField("ALC_HRTF_SOFT");
-                    Object v = f.get(null);
-                    if (v instanceof Integer) {
-                        hrtfAttr = (Integer) v;
-                        break;
-                    }
-                } catch (Throwable ignore) {
-                }
-            }
-
-            ALC_SET_THREAD_CONTEXT = setThreadCtx;
-            HAS_THREAD_LOCAL_CONTEXT = hasTlc;
-            ALC_HRTF_SOFT_ATTR = hrtfAttr;
-        }
+        static final int ALC_HRTF_SOFT_ATTR = SOFTHRTF.ALC_HRTF_SOFT;
 
         static boolean setThreadContext(long ctx) {
-            if (!HAS_THREAD_LOCAL_CONTEXT || ALC_SET_THREAD_CONTEXT == null) return false;
             try {
-                ALC_SET_THREAD_CONTEXT.invoke(null, ctx);
-                return true;
+                return EXTThreadLocalContext.alcSetThreadContext(ctx);
             } catch (Throwable t) {
                 return false;
             }
@@ -150,7 +104,7 @@ public final class AuralisAL implements AutoCloseable {
             this.deviceName = deviceName;
             this.threadName = Objects.requireNonNullElse(threadName, "Auralis-OpenAL");
             this.daemonThread = daemonThread;
-            this.contextAttributes = contextAttributes;
+            this.contextAttributes = contextAttributes == null ? null : contextAttributes.clone();
             this.idleWaitMillis = Math.max(0L, idleWaitMillis);
             this.strictChecks = strictChecks;
             this.destroyContextOnShutdown = destroyContextOnShutdown;
@@ -162,19 +116,23 @@ public final class AuralisAL implements AutoCloseable {
                     null,
                     "Auralis-OpenAL",
                     true,
-                    null,
+                    new int[] { ALC_REFRESH, 60, ALC_SYNC, ALC_FALSE, 0 },
                     0L,
                     false,
-                    false,
-                    false
+                    true,
+                    true
             );
         }
 
         public static Config defaultsWithHrtf(boolean enableHrtf) {
-            int[] attrs = null;
-            if (enableHrtf && AlcExt.ALC_HRTF_SOFT_ATTR != 0) {
-                attrs = new int[]{ AlcExt.ALC_HRTF_SOFT_ATTR, ALC_TRUE, 0 };
-            }
+            int[] attrs = enableHrtf
+                    ? new int[] {
+                            AlcExt.ALC_HRTF_SOFT_ATTR, ALC_TRUE,
+                            ALC_REFRESH, 60,
+                            ALC_SYNC, ALC_FALSE,
+                            0
+                    }
+                    : new int[] { ALC_REFRESH, 60, ALC_SYNC, ALC_FALSE, 0 };
             return new Config(
                     null,
                     "Auralis-OpenAL",
@@ -182,8 +140,8 @@ public final class AuralisAL implements AutoCloseable {
                     attrs,
                     0L,
                     true,
-                    false,
-                    false
+                    true,
+                    true
             );
         }
     }
@@ -200,6 +158,9 @@ public final class AuralisAL implements AutoCloseable {
 
     private interface ALTask {
         void run() throws Throwable;
+
+        default void reject(Throwable cause) {
+        }
     }
 
     private static final class TaskWrapper implements ALTask {
@@ -208,6 +169,36 @@ public final class AuralisAL implements AutoCloseable {
         @Override public void run() { runnable.run(); }
     }
 
+    private static final class FutureTaskWrapper<T> implements ALTask {
+        private final Callable<T> callable;
+        private final CompletableFuture<T> future;
+
+        FutureTaskWrapper(Callable<T> callable, CompletableFuture<T> future) {
+            this.callable = callable;
+            this.future = future;
+        }
+
+        @Override
+        public void run() throws Throwable {
+            if (future.isDone()) return;
+            try {
+                future.complete(callable.call());
+            } catch (VirtualMachineError | ThreadDeath fatal) {
+                future.completeExceptionally(fatal);
+                throw fatal;
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            }
+        }
+
+        @Override
+        public void reject(Throwable cause) {
+            future.completeExceptionally(cause);
+        }
+    }
+
+    private static final ALTask STOP_TASK = () -> { };
+
     private final Config config;
 
     private final AtomicBoolean started;
@@ -215,6 +206,7 @@ public final class AuralisAL implements AutoCloseable {
     private final AtomicBoolean closed;
 
     private final BlockingQueue<ALTask> queue;
+    private final Object queueGate;
 
     private final CountDownLatch startLatch;
     private final CountDownLatch stopLatch;
@@ -238,7 +230,10 @@ public final class AuralisAL implements AutoCloseable {
         this.stopping = new AtomicBoolean(false);
         this.closed = new AtomicBoolean(false);
 
-        this.queue = new LinkedBlockingQueue<>();
+        // One reserved slot guarantees shutdown can always enqueue STOP_TASK,
+        // even after a producer burst fills the normal task budget.
+        this.queue = new LinkedBlockingQueue<>(MAX_QUEUED_TASKS + 1);
+        this.queueGate = new Object();
 
         this.startLatch = new CountDownLatch(1);
         this.stopLatch = new CountDownLatch(1);
@@ -267,7 +262,17 @@ public final class AuralisAL implements AutoCloseable {
         t.setDaemon(config.daemonThread);
         this.alThread = t;
         GFBsAuralis.LOGGER.info("Launching OpenAL thread: {}", config.threadName);
-        t.start();
+        try {
+            t.start();
+        } catch (Throwable startFailure) {
+            fatalError.compareAndSet(null, startFailure);
+            stopping.set(true);
+            startLatch.countDown();
+            stopLatch.countDown();
+            if (startFailure instanceof RuntimeException runtime) throw runtime;
+            if (startFailure instanceof Error error) throw error;
+            throw new IllegalStateException("Unable to start OpenAL thread", startFailure);
+        }
 
         awaitStartOrThrow();
     }
@@ -277,24 +282,40 @@ public final class AuralisAL implements AutoCloseable {
             GFBsAuralis.LOGGER.debug("OpenAL not started, skipping stop");
             return;
         }
-        if (stopping.compareAndSet(false, true)) {
-            GFBsAuralis.LOGGER.info("Stopping OpenAL thread: {}", config.threadName);
-            queue.offer(() -> {});
-            Thread t = this.alThread;
-            if (t != null) t.interrupt();
+        synchronized (queueGate) {
+            if (stopping.compareAndSet(false, true)) {
+                GFBsAuralis.LOGGER.info("Stopping OpenAL thread: {}", config.threadName);
+                // The gate prevents any task from being accepted behind this marker.
+                // Everything already accepted is drained in FIFO order first.
+                queue.offer(STOP_TASK);
+            }
+        }
+
+        if (isOnALThread()) {
+            // Waiting here would deadlock. The loop consumes STOP_TASK as soon as
+            // the current callback returns.
+            return;
         }
 
         try {
-            stopLatch.await();
+            if (!stopLatch.await(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                GFBsAuralis.LOGGER.error(
+                        "Timed out after {} seconds while stopping OpenAL thread {}; leaving daemon thread for JVM cleanup",
+                        STOP_TIMEOUT_SECONDS,
+                        config.threadName
+                );
+                return;
+            }
             GFBsAuralis.LOGGER.info("OpenAL thread stopped successfully: {}", config.threadName);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while stopping OpenAL thread", e);
+            GFBsAuralis.LOGGER.warn("Interrupted while stopping OpenAL thread: {}", config.threadName);
+            return;
         }
 
         Throwable fatal = fatalError.get();
         if (fatal != null) {
-            throw new RuntimeException("OpenAL thread terminated with fatal error", fatal);
+            GFBsAuralis.LOGGER.error("OpenAL thread terminated with fatal error", fatal);
         }
     }
 
@@ -318,8 +339,9 @@ public final class AuralisAL implements AutoCloseable {
     }
 
     public void ensureRunning() {
-        ensureNotClosed();
+        if (closed.get()) throw new RejectedExecutionException("AuralisAL is closed");
         if (!started.get()) throw new IllegalStateException("AuralisAL not started");
+        if (stopping.get()) throw new RejectedExecutionException("AuralisAL is stopping");
         Throwable fatal = fatalError.get();
         if (fatal != null) {
             GFBsAuralis.LOGGER.error("AuralisAL has fatal error; OpenAL thread is not healthy: {}", String.valueOf(fatal));
@@ -329,22 +351,17 @@ public final class AuralisAL implements AutoCloseable {
 
     public void submit(Runnable task) {
         Objects.requireNonNull(task, "task");
-        ensureRunning();
-        queue.offer(new TaskWrapper(task));
+        enqueue(new TaskWrapper(task));
     }
 
     public <T> CompletableFuture<T> submit(Callable<T> task) {
         Objects.requireNonNull(task, "task");
-        ensureRunning();
         CompletableFuture<T> future = new CompletableFuture<>();
-        queue.offer(() -> {
-            try {
-                T v = task.call();
-                future.complete(v);
-            } catch (Throwable t) {
-                future.completeExceptionally(t);
-            }
-        });
+        try {
+            enqueue(new FutureTaskWrapper<>(task, future));
+        } catch (Throwable t) {
+            future.completeExceptionally(t);
+        }
         return future;
     }
 
@@ -358,15 +375,10 @@ public final class AuralisAL implements AutoCloseable {
             return;
         }
 
-        CompletableFuture<Void> f = new CompletableFuture<>();
-        queue.offer(() -> {
-            try {
+        CompletableFuture<Void> f = submit(() -> {
                 task.run();
                 if (config.strictChecks) alCheck("after executeBlocking task");
-                f.complete(null);
-            } catch (Throwable t) {
-                f.completeExceptionally(t);
-            }
+                return null;
         });
         joinFuture(f);
     }
@@ -455,16 +467,31 @@ public final class AuralisAL implements AutoCloseable {
             GFBsAuralis.LOGGER.info("OpenAL initialized successfully on device: {}", config.deviceName != null ? config.deviceName : "default");
             startLatch.countDown();
 
-            while (!stopping.get()) {
+            while (true) {
                 ALTask task;
-                if (config.idleWaitMillis <= 0L) {
-                    task = queue.take();
-                } else {
-                    task = queue.poll(config.idleWaitMillis, TimeUnit.MILLISECONDS);
+                try {
+                    if (config.idleWaitMillis <= 0L) {
+                        task = queue.take();
+                    } else {
+                        task = queue.poll(config.idleWaitMillis, TimeUnit.MILLISECONDS);
+                    }
+                } catch (InterruptedException interrupted) {
+                    if (stopping.get()) continue;
+                    GFBsAuralis.LOGGER.warn("OpenAL thread was interrupted unexpectedly; continuing");
+                    continue;
                 }
                 if (task != null) {
-                    task.run();
-                    if (config.strictChecks && !stopping.get()) alCheck("after task");
+                    if (task == STOP_TASK) break;
+                    try {
+                        task.run();
+                        if (config.strictChecks) alCheck("after task");
+                    } catch (VirtualMachineError | ThreadDeath fatal) {
+                        throw fatal;
+                    } catch (Throwable taskError) {
+                        // A bad sound, processor, or callback must not kill the only
+                        // OpenAL owner thread and strand every remaining voice.
+                        GFBsAuralis.LOGGER.error("OpenAL task failed; task was isolated and audio processing will continue", taskError);
+                    }
                 }
             }
             GFBsAuralis.LOGGER.info("OpenAL thread stopping: {}", config.threadName);
@@ -474,16 +501,15 @@ public final class AuralisAL implements AutoCloseable {
             GFBsAuralis.LOGGER.error("OpenAL thread encountered fatal error: {}", t.getMessage(), t);
             startLatch.countDown();
         } finally {
+            startLatch.countDown();
             try {
-                while (!queue.isEmpty()) {
-                    ALTask task = queue.poll();
-                    if (task != null) {
-                        try {
-                            task.run();
-                        } catch (Throwable t2) {
-                            GFBsAuralis.LOGGER.warn("Error executing queued task during shutdown: {}", t2.getMessage());
-                        }
-                    }
+                Throwable rejection = fatalError.get();
+                if (rejection == null) {
+                    rejection = new RejectedExecutionException("AuralisAL stopped before task execution");
+                }
+                ALTask abandoned;
+                while ((abandoned = queue.poll()) != null) {
+                    if (abandoned != STOP_TASK) abandoned.reject(rejection);
                 }
                 destroyOpenAL();
                 GFBsAuralis.LOGGER.info("OpenAL resources destroyed successfully");
@@ -515,12 +541,16 @@ public final class AuralisAL implements AutoCloseable {
         // ---- Context create (prefer thread-local if available) ----
         int[] attrsToUse = config.contextAttributes;
         if (attrsToUse == null) {
-            attrsToUse = buildDefaultContextAttributes(this.alcCaps);
+            attrsToUse = buildDefaultContextAttributes();
         }
 
         long ctx = alcCreateContext(dev, attrsToUse);
         if (ctx == 0L && attrsToUse != null) {
-            GFBsAuralis.LOGGER.warn("alcCreateContext failed with requested attributes, retrying with defaults");
+            int attributesError = alcGetError(dev);
+            GFBsAuralis.LOGGER.warn(
+                    "alcCreateContext failed with requested attributes (ALC error=0x{}), retrying with defaults",
+                    Integer.toHexString(attributesError)
+            );
             ctx = alcCreateContext(dev, (int[]) null);
         }
         if (ctx == 0L) {
@@ -531,17 +561,30 @@ public final class AuralisAL implements AutoCloseable {
         this.contextHandle = ctx;
 
         boolean bound;
-        if (this.alcCaps != null && this.alcCaps.ALC_EXT_thread_local_context && AlcExt.HAS_THREAD_LOCAL_CONTEXT) {
+        if (this.alcCaps != null && this.alcCaps.ALC_EXT_thread_local_context) {
+            // Clear any sticky ALC error left by an attribute fallback before
+            // validating the context-binding call itself.
+            alcGetError(dev);
             boolean ok = AlcExt.setThreadContext(ctx);
             if (ok) {
                 bound = (alcGetError(dev) == ALC_NO_ERROR);
+                if (!bound) {
+                    // Do not destroy a context that may still be current on this
+                    // thread after a driver reported a binding error.
+                    AlcExt.setThreadContext(0L);
+                }
             } else {
                 bound = false;
             }
             this.usingThreadLocalContext = bound;
         } else {
-            bound = alcMakeContextCurrent(ctx);
+            // The core ALC current context is process-global. Minecraft owns a
+            // second OpenAL context on another thread, so using the core fallback
+            // would let the two engines steal each other's context and corrupt
+            // source/buffer state. OpenAL Soft (bundled by Minecraft) exposes EXT.
+            bound = false;
             this.usingThreadLocalContext = false;
+            GFBsAuralis.LOGGER.error("OpenAL device lacks ALC_EXT_thread_local_context; refusing unsafe shared-context startup");
         }
 
         if (!bound) {
@@ -569,19 +612,20 @@ public final class AuralisAL implements AutoCloseable {
 
     private void destroyOpenAL() {
         long dev = this.deviceHandle;
+        long ctx = this.contextHandle;
 
-        // Unbind
-        if (this.usingThreadLocalContext && AlcExt.HAS_THREAD_LOCAL_CONTEXT) {
-            try {
-                AlcExt.setThreadContext(0L);
-            } catch (Throwable ignore) {
-                alcMakeContextCurrent(0L);
+        // Unbind only if this instance successfully created/bound a context.
+        // Calling the core unbind on a failed partial initialization could clear
+        // another engine's process-global context.
+        if (ctx != 0L) {
+            if (this.usingThreadLocalContext
+                    || (this.alcCaps != null && this.alcCaps.ALC_EXT_thread_local_context)) {
+                if (!AlcExt.setThreadContext(0L)) {
+                    GFBsAuralis.LOGGER.warn("Failed to clear Auralis thread-local OpenAL context during shutdown");
+                }
             }
-        } else {
-            alcMakeContextCurrent(0L);
         }
 
-        long ctx = this.contextHandle;
         if (ctx != 0L) {
             if (config.destroyContextOnShutdown) {
                 alcDestroyContext(ctx);
@@ -589,11 +633,8 @@ public final class AuralisAL implements AutoCloseable {
             this.contextHandle = 0L;
         }
 
-        // Do NOT close the device if we are sharing the default device with Minecraft.
-        // OpenAL Soft may return the same device handle for multiple alcOpenDevice calls.
-        // If we close it, Minecraft's sound system will crash during its shutdown because
-        // its device handle becomes invalid.
-        // Since we are shutting down anyway, the OS will reclaim the device resources.
+        // Each successful alcOpenDevice call owns a matching close. Auralis uses
+        // its own context/device handle and never closes Minecraft's handle.
         if (dev != 0L) {
             if (config.closeDeviceOnShutdown) {
                 alcCloseDevice(dev);
@@ -625,15 +666,7 @@ public final class AuralisAL implements AutoCloseable {
         if (config.strictChecks) GFBsAuralis.LOGGER.error(msg);
     }
 
-    private static int[] buildDefaultContextAttributes(ALCCapabilities caps) {
-        if (caps != null && caps.ALC_SOFT_HRTF && AlcExt.ALC_HRTF_SOFT_ATTR != 0) {
-            return new int[] {
-                    AlcExt.ALC_HRTF_SOFT_ATTR, ALC_TRUE,
-                    ALC_REFRESH, 60,
-                    ALC_SYNC, ALC_FALSE,
-                    0
-            };
-        }
+    private static int[] buildDefaultContextAttributes() {
         return new int[] {
                 ALC_REFRESH, 60,
                 ALC_SYNC, ALC_FALSE,
@@ -675,7 +708,18 @@ public final class AuralisAL implements AutoCloseable {
     }
 
     private void ensureNotClosed() {
-        if (closed.get()) GFBsAuralis.LOGGER.warn("AuralisAL is closed");
+        if (closed.get()) throw new IllegalStateException("AuralisAL is closed");
+    }
+
+    private void enqueue(ALTask task) {
+        synchronized (queueGate) {
+            ensureRunning();
+            if (queue.size() >= MAX_QUEUED_TASKS || !queue.offer(task)) {
+                throw new RejectedExecutionException(
+                        "OpenAL task queue is full (limit=" + MAX_QUEUED_TASKS + ")"
+                );
+            }
+        }
     }
 
     private void awaitStartOrThrow() {
@@ -718,8 +762,18 @@ public final class AuralisAL implements AutoCloseable {
         }
 
         GFBsAuralis.LOGGER.info("Creating and starting global AuralisAL instance");
-        created.start();
-        return created;
+        try {
+            created.start();
+            return created;
+        } catch (Throwable startupFailure) {
+            GLOBAL.compareAndSet(created, null);
+            try {
+                created.close();
+            } catch (Throwable cleanupFailure) {
+                startupFailure.addSuppressed(cleanupFailure);
+            }
+            throw startupFailure;
+        }
     }
 
     public static void stopAndClearGlobal() {

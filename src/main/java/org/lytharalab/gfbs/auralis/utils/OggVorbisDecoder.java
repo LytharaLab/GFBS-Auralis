@@ -45,9 +45,12 @@ public class OggVorbisDecoder {
     // Chunk sizes tuned for low GC & good throughput.
     private static final int FULL_DECODE_FRAMES_PER_CHUNK = 8192;
     private static final int STREAM_DECODE_FRAMES_PER_CHUNK = 4096;
+    private static final int MAX_FULL_DECODE_COMPRESSED_BYTES = 256 * 1024 * 1024;
+    private static final int MAX_DECODED_PCM_BYTES = 256 * 1024 * 1024;
+    private static final int MAX_INITIAL_PCM_BYTES = 16 * 1024 * 1024;
 
     public static DecodedPcm decodeFully(InputStream in) throws Exception {
-        ByteBuffer ogg = readAllToNative(in, Integer.MAX_VALUE);
+        ByteBuffer ogg = readAllToNative(in, MAX_FULL_DECODE_COMPRESSED_BYTES);
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
             IntBuffer error = stack.mallocInt(1);
@@ -56,12 +59,12 @@ public class OggVorbisDecoder {
                 throw new IllegalStateException("stb_vorbis_open_memory failed, error=" + error.get(0));
             }
 
-            STBVorbisInfo info = STBVorbisInfo.malloc(stack);
             try {
+                STBVorbisInfo info = STBVorbisInfo.malloc(stack);
                 STBVorbis.stb_vorbis_get_info(handle, info);
                 int inChannels = info.channels();
                 int sampleRate = info.sample_rate();
-                if (inChannels <= 0 || sampleRate <= 0) {
+                if (inChannels <= 0 || inChannels > 255 || sampleRate <= 0 || sampleRate > 768_000) {
                     throw new IllegalStateException("Invalid OGG/Vorbis info: channels=" + inChannels + ", sampleRate=" + sampleRate);
                 }
 
@@ -71,20 +74,26 @@ public class OggVorbisDecoder {
 
                 // stb_vorbis_stream_length_in_samples can be 0/-1 for some edge cases.
                 int lengthInSamplesPerChannel = STBVorbis.stb_vorbis_stream_length_in_samples(handle);
-                int estimatedFrames = (lengthInSamplesPerChannel > 0) ? lengthInSamplesPerChannel : (sampleRate * 2);
-                int estimatedBytes = safeMul(safeMul(estimatedFrames, outChannels), 2);
+                int estimatedFrames = (lengthInSamplesPerChannel > 0)
+                        ? lengthInSamplesPerChannel
+                        : safeMul(sampleRate, 2);
+                long reportedBytes = (long) estimatedFrames * outChannels * 2L;
+                int estimatedBytes = (int) Math.max(
+                        4_096L,
+                        Math.min((long) MAX_INITIAL_PCM_BYTES, Math.min((long) MAX_DECODED_PCM_BYTES, reportedBytes))
+                );
 
                 ByteBuffer pcm = MemoryUtil.memAlloc(estimatedBytes);
-                pcm.order(ByteOrder.nativeOrder());
-                ShortBuffer pcmShort = pcm.asShortBuffer();
-
-                int writePosBytes = 0;
-
-                // Decode in float, then dither+convert to 16-bit PCM.
-                int framesPerChunk = FULL_DECODE_FRAMES_PER_CHUNK;
-                FloatBuffer inFloat = MemoryUtil.memAllocFloat(framesPerChunk * inChannels);
+                FloatBuffer inFloat = null;
 
                 try {
+                    pcm.order(ByteOrder.nativeOrder());
+                    ShortBuffer pcmShort = pcm.asShortBuffer();
+                    int writePosBytes = 0;
+
+                    // Decode in float, then dither+convert to 16-bit PCM.
+                    int framesPerChunk = FULL_DECODE_FRAMES_PER_CHUNK;
+                    inFloat = MemoryUtil.memAllocFloat(safeMul(framesPerChunk, inChannels));
                     Dither dither = new Dither();
                     float[] downmixTmp = (inChannels > 2) ? new float[framesPerChunk * 2] : null;
                     float downmixGain = 1.0f;
@@ -95,19 +104,31 @@ public class OggVorbisDecoder {
                         if (framesDecoded <= 0) break;
 
                         int neededBytes = safeMul(safeMul(framesDecoded, outChannels), 2);
-                        if (writePosBytes + neededBytes > pcm.capacity()) {
-                            int newCap = growCapacity(pcm.capacity(), writePosBytes + neededBytes);
+                        int requiredBytes = safeAdd(writePosBytes, neededBytes);
+                        if (requiredBytes > MAX_DECODED_PCM_BYTES) {
+                            throw new IllegalStateException(
+                                    "Decoded OGG/Vorbis PCM exceeds the " + MAX_DECODED_PCM_BYTES + " byte safety limit"
+                            );
+                        }
+                        if (requiredBytes > pcm.capacity()) {
+                            int newCap = Math.min(
+                                    MAX_DECODED_PCM_BYTES,
+                                    growCapacity(pcm.capacity(), requiredBytes)
+                            );
                             ByteBuffer grown = MemoryUtil.memAlloc(newCap);
                             grown.order(ByteOrder.nativeOrder());
+                            boolean transferred = false;
                             try {
                                 pcm.position(0).limit(writePosBytes);
                                 grown.put(pcm);
-                                MemoryUtil.memFree(pcm);
+                                ShortBuffer grownShort = grown.asShortBuffer();
+                                ByteBuffer previous = pcm;
                                 pcm = grown;
-                                pcmShort = pcm.asShortBuffer();
-                            } catch (Exception e) {
-                                MemoryUtil.memFree(grown);
-                                throw e;
+                                pcmShort = grownShort;
+                                transferred = true;
+                                MemoryUtil.memFree(previous);
+                            } finally {
+                                if (!transferred) MemoryUtil.memFree(grown);
                             }
                         }
 
@@ -130,13 +151,17 @@ public class OggVorbisDecoder {
                         writePosBytes += neededBytes;
                     }
 
+                    if (writePosBytes <= 0) {
+                        throw new IllegalStateException("OGG/Vorbis stream decoded no PCM samples");
+                    }
                     pcm.position(0).limit(writePosBytes);
                     return new DecodedPcm(alFormat, sampleRate, pcm);
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     MemoryUtil.memFree(pcm);
-                    throw e;
+                    rethrow(e);
+                    throw new AssertionError("unreachable");
                 } finally {
-                    MemoryUtil.memFree(inFloat);
+                    if (inFloat != null) MemoryUtil.memFree(inFloat);
                 }
             } finally {
                 STBVorbis.stb_vorbis_close(handle);
@@ -147,11 +172,19 @@ public class OggVorbisDecoder {
     }
 
     public static StreamDecoder createStreamDecoder(InputStream in) throws Exception {
-        return new StreamDecoder(in);
+        return new StreamDecoder(in, MAX_FULL_DECODE_COMPRESSED_BYTES);
+    }
+
+    public static StreamDecoder createStreamDecoder(InputStream in, int maxCompressedBytes) throws Exception {
+        if (maxCompressedBytes <= 0) {
+            throw new IllegalArgumentException("maxCompressedBytes must be positive");
+        }
+        return new StreamDecoder(in, maxCompressedBytes);
     }
 
     private static ByteBuffer readAllToNative(InputStream in, int maxBytes) throws Exception {
-        int cap = 64 * 1024;
+        if (maxBytes <= 0) throw new IllegalArgumentException("maxBytes must be positive");
+        int cap = Math.min(64 * 1024, maxBytes);
         ByteBuffer out = MemoryUtil.memAlloc(cap);
         byte[] tmp = new byte[8192];
         int total = 0;
@@ -164,30 +197,34 @@ public class OggVorbisDecoder {
                     throw new IllegalStateException("OGG data exceeds limit");
                 }
                 if (total > out.capacity()) {
-                    int newCap = growCapacity(out.capacity(), total);
+                    int newCap = Math.min(maxBytes, growCapacity(out.capacity(), total));
                     ByteBuffer grown = MemoryUtil.memAlloc(newCap);
+                    boolean transferred = false;
                     try {
                         out.position(0).limit(total - r);
                         grown.put(out);
-                        MemoryUtil.memFree(out);
+                        ByteBuffer previous = out;
                         out = grown;
-                    } catch (Exception e) {
-                        MemoryUtil.memFree(grown);
-                        throw e;
+                        transferred = true;
+                        MemoryUtil.memFree(previous);
+                    } finally {
+                        if (!transferred) MemoryUtil.memFree(grown);
                     }
                 }
                 out.put(tmp, 0, r);
             }
             out.flip();
             return out;
-        } catch (Exception e) {
+        } catch (Throwable e) {
             MemoryUtil.memFree(out);
-            throw e;
+            rethrow(e);
+            throw new AssertionError("unreachable");
         }
     }
 
     public static class StreamDecoder implements AutoCloseable {
         private final ByteBuffer oggBuffer;
+        private final Object nativeLock = new Object();
         private long handle;
         private int inChannels;
         private int outChannels;
@@ -202,9 +239,9 @@ public class OggVorbisDecoder {
         private final Dither dither = new Dither();
         private float downmixGain = 1.0f;
 
-        private StreamDecoder(InputStream in) throws Exception {
+        private StreamDecoder(InputStream in, int maxCompressedBytes) throws Exception {
             try (InputStream ownedInput = in) {
-                oggBuffer = readAllToNative(ownedInput, Integer.MAX_VALUE);
+                oggBuffer = readAllToNative(ownedInput, maxCompressedBytes);
             }
 
             try {
@@ -217,37 +254,60 @@ public class OggVorbisDecoder {
 
                     STBVorbisInfo info = STBVorbisInfo.malloc(stack);
                     STBVorbis.stb_vorbis_get_info(handle, info);
-                        inChannels = info.channels();
-                        sampleRate = info.sample_rate();
-                        if (inChannels <= 0 || sampleRate <= 0) {
-                            throw new IllegalStateException("Invalid OGG/Vorbis info: channels=" + inChannels + ", sampleRate=" + sampleRate);
-                        }
+                    inChannels = info.channels();
+                    sampleRate = info.sample_rate();
+                    if (inChannels <= 0 || inChannels > 255 || sampleRate <= 0 || sampleRate > 768_000) {
+                        throw new IllegalStateException("Invalid OGG/Vorbis info: channels=" + inChannels + ", sampleRate=" + sampleRate);
+                    }
 
-                        // AL10 safest output is mono/stereo.
-                        outChannels = (inChannels <= 1) ? 1 : 2;
-                        alFormat = (outChannels == 1) ? AL10.AL_FORMAT_MONO16 : AL10.AL_FORMAT_STEREO16;
+                    // AL10 safest output is mono/stereo.
+                    outChannels = (inChannels <= 1) ? 1 : 2;
+                    alFormat = (outChannels == 1) ? AL10.AL_FORMAT_MONO16 : AL10.AL_FORMAT_STEREO16;
 
-                        isOpen = true;
-                        eof = false;
-                        float reportedDuration = STBVorbis.stb_vorbis_stream_length_in_seconds(handle);
-                        if (Float.isFinite(reportedDuration) && reportedDuration > 0.0f) {
-                            durationSeconds = reportedDuration;
-                        } else {
-                            int lengthSamples = STBVorbis.stb_vorbis_stream_length_in_samples(handle);
-                            durationSeconds = lengthSamples > 0
-                                    ? (lengthSamples / (double) Math.max(1, sampleRate))
-                                    : 0.0;
-                        }
+                    eof = false;
+                    float reportedDuration = STBVorbis.stb_vorbis_stream_length_in_seconds(handle);
+                    if (Float.isFinite(reportedDuration) && reportedDuration > 0.0f) {
+                        durationSeconds = reportedDuration;
+                    } else {
+                        int lengthSamples = STBVorbis.stb_vorbis_stream_length_in_samples(handle);
+                        durationSeconds = lengthSamples > 0
+                                ? (lengthSamples / (double) Math.max(1, sampleRate))
+                                : 0.0;
+                    }
 
-                        int frames = STREAM_DECODE_FRAMES_PER_CHUNK;
-                        floatChunk = MemoryUtil.memAllocFloat(frames * inChannels);
-                        if (inChannels > 2) {
-                            downmixTmp = new float[frames * 2];
-                        }
+                    int frames = STREAM_DECODE_FRAMES_PER_CHUNK;
+                    floatChunk = MemoryUtil.memAllocFloat(safeMul(frames, inChannels));
+                    if (inChannels > 2) {
+                        downmixTmp = new float[safeMul(frames, 2)];
+                    }
+                    isOpen = true;
                 }
-            } catch (Exception e) {
-                MemoryUtil.memFree(oggBuffer);
-                throw e;
+            } catch (Throwable failure) {
+                long failedHandle = handle;
+                handle = MemoryUtil.NULL;
+                if (failedHandle != MemoryUtil.NULL) {
+                    try {
+                        STBVorbis.stb_vorbis_close(failedHandle);
+                    } catch (Throwable cleanupFailure) {
+                        failure.addSuppressed(cleanupFailure);
+                    }
+                }
+                if (floatChunk != null) {
+                    try {
+                        MemoryUtil.memFree(floatChunk);
+                    } catch (Throwable cleanupFailure) {
+                        failure.addSuppressed(cleanupFailure);
+                    }
+                    floatChunk = null;
+                }
+                try {
+                    MemoryUtil.memFree(oggBuffer);
+                } catch (Throwable cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                if (failure instanceof Exception exception) throw exception;
+                if (failure instanceof Error error) throw error;
+                throw new RuntimeException(failure);
             }
         }
 
@@ -268,98 +328,157 @@ public class OggVorbisDecoder {
         }
 
         public int decodeChunk(ByteBuffer output) {
-            if (!isOpen) {
-                throw new IllegalStateException("Decoder is closed");
+            synchronized (nativeLock) {
+                requireOpen();
+                if (eof) {
+                    return 0;
+                }
+
+                output.order(ByteOrder.nativeOrder());
+
+                int bytesPerSample = 2;
+                int frameBytes = safeMul(outChannels, bytesPerSample);
+                int framesWanted = output.remaining() / frameBytes;
+                if (framesWanted <= 0) {
+                    return 0;
+                }
+
+                int framesPerCall = Math.min(framesWanted, STREAM_DECODE_FRAMES_PER_CHUNK);
+
+                FloatBuffer chunk = floatChunk;
+                if (chunk == null) throw new IllegalStateException("Decoder workspace is unavailable");
+                chunk.clear();
+                chunk.limit(safeMul(framesPerCall, inChannels));
+
+                int framesDecoded = STBVorbis.stb_vorbis_get_samples_float_interleaved(handle, inChannels, chunk);
+                if (framesDecoded <= 0) {
+                    eof = true;
+                    return 0;
+                }
+
+                int bytesDecoded = safeMul(safeMul(framesDecoded, outChannels), bytesPerSample);
+                ShortBuffer outShort = output.slice().order(ByteOrder.nativeOrder()).asShortBuffer();
+                chunk.position(0).limit(safeMul(framesDecoded, inChannels));
+
+                if (inChannels == outChannels) {
+                    convertFloatToPcm16Interleaved(chunk, outShort, framesDecoded, outChannels, dither);
+                } else if (inChannels == 1 && outChannels == 2) {
+                    convertMonoToStereoPcm16(chunk, outShort, framesDecoded, dither);
+                } else {
+                    float[] downmix = downmixTmp;
+                    if (downmix == null) throw new IllegalStateException("Decoder downmix workspace is unavailable");
+                    downmixToStereo(chunk, framesDecoded, inChannels, downmix);
+                    downmixGain = applyLimiterStereoGain(downmix, framesDecoded, downmixGain);
+                    convertFloatArrayToPcm16Interleaved(downmix, outShort, framesDecoded, 2, dither);
+                }
+
+                output.position(output.position() + bytesDecoded);
+                return bytesDecoded;
             }
-            if (eof) {
-                return 0;
-            }
-
-            output.order(ByteOrder.nativeOrder());
-
-            int bytesPerSample = 2;
-            int framesWanted = output.remaining() / (outChannels * bytesPerSample);
-            if (framesWanted <= 0) {
-                return 0;
-            }
-
-            int framesPerCall = Math.min(framesWanted, STREAM_DECODE_FRAMES_PER_CHUNK);
-
-            floatChunk.clear();
-            floatChunk.limit(framesPerCall * inChannels);
-
-            int framesDecoded = STBVorbis.stb_vorbis_get_samples_float_interleaved(handle, inChannels, floatChunk);
-            if (framesDecoded <= 0) {
-                eof = true;
-                return 0;
-            }
-
-            int bytesDecoded = framesDecoded * outChannels * bytesPerSample;
-            ShortBuffer outShort = output.slice().order(ByteOrder.nativeOrder()).asShortBuffer();
-            floatChunk.position(0).limit(framesDecoded * inChannels);
-
-            if (inChannels == outChannels) {
-                convertFloatToPcm16Interleaved(floatChunk, outShort, framesDecoded, outChannels, dither);
-            } else if (inChannels == 1 && outChannels == 2) {
-                convertMonoToStereoPcm16(floatChunk, outShort, framesDecoded, dither);
-            } else {
-                downmixToStereo(floatChunk, framesDecoded, inChannels, downmixTmp);
-                downmixGain = applyLimiterStereoGain(downmixTmp, framesDecoded, downmixGain);
-                convertFloatArrayToPcm16Interleaved(downmixTmp, outShort, framesDecoded, 2, dither);
-            }
-
-            output.position(output.position() + bytesDecoded);
-            return bytesDecoded;
         }
 
         public boolean isEof() {
-            return !isOpen || eof;
+            synchronized (nativeLock) {
+                return !isOpen || eof;
+            }
         }
 
         public void seekStart() {
-            if (!isOpen) {
-                throw new IllegalStateException("Decoder is closed");
+            synchronized (nativeLock) {
+                requireOpen();
+                if (!STBVorbis.stb_vorbis_seek_start(handle)) {
+                    throw new IllegalStateException("stb_vorbis_seek_start failed");
+                }
+                eof = false;
             }
-            STBVorbis.stb_vorbis_seek_start(handle);
-            eof = false;
         }
 
         public void seekSeconds(double seconds) {
-            if (!isOpen) {
-                throw new IllegalStateException("Decoder is closed");
+            synchronized (nativeLock) {
+                requireOpen();
+                double finiteSeconds = Double.isFinite(seconds) ? seconds : 0.0;
+                double clamped = Math.max(0.0, finiteSeconds);
+                if (durationSeconds > 0.0) {
+                    clamped = Math.min(clamped, Math.max(0.0, durationSeconds - (1.0 / Math.max(1, sampleRate))));
+                }
+                long sample = Math.round(clamped * sampleRate);
+                int targetSample = (int) Math.min(Integer.MAX_VALUE, Math.max(0L, sample));
+                if (!STBVorbis.stb_vorbis_seek(handle, targetSample)
+                        && !STBVorbis.stb_vorbis_seek_start(handle)) {
+                    throw new IllegalStateException("Unable to seek OGG/Vorbis decoder");
+                }
+                eof = false;
             }
-            double clamped = Math.max(0.0, seconds);
-            if (durationSeconds > 0.0) {
-                clamped = Math.min(clamped, Math.max(0.0, durationSeconds - (1.0 / Math.max(1, sampleRate))));
-            }
-            long sample = Math.round(clamped * sampleRate);
-            int targetSample = (int) Math.min(Integer.MAX_VALUE, Math.max(0L, sample));
-            if (!STBVorbis.stb_vorbis_seek(handle, targetSample)) {
-                STBVorbis.stb_vorbis_seek_start(handle);
-            }
-            eof = false;
         }
 
         @Override
         public void close() {
-            if (isOpen) {
-                STBVorbis.stb_vorbis_close(handle);
-                MemoryUtil.memFree(oggBuffer);
-                if (floatChunk != null) {
-                    MemoryUtil.memFree(floatChunk);
-                    floatChunk = null;
-                }
+            synchronized (nativeLock) {
+                if (!isOpen) return;
+
+                // Invalidate Java-visible state before releasing any native memory.
+                // A queued late seek/decode will now fail closed instead of calling
+                // STB with a freed pointer (the crash captured in hs_err_pid33004).
                 isOpen = false;
+                eof = true;
+                long closingHandle = handle;
+                handle = MemoryUtil.NULL;
+                FloatBuffer closingChunk = floatChunk;
+                floatChunk = null;
+                downmixTmp = null;
+
+                Throwable failure = null;
+                try {
+                    if (closingHandle != MemoryUtil.NULL) {
+                        STBVorbis.stb_vorbis_close(closingHandle);
+                    }
+                } catch (Throwable t) {
+                    failure = t;
+                }
+                try {
+                    MemoryUtil.memFree(oggBuffer);
+                } catch (Throwable t) {
+                    if (failure == null) failure = t; else failure.addSuppressed(t);
+                }
+                try {
+                    if (closingChunk != null) MemoryUtil.memFree(closingChunk);
+                } catch (Throwable t) {
+                    if (failure == null) failure = t; else failure.addSuppressed(t);
+                }
+
+                if (failure instanceof RuntimeException runtime) throw runtime;
+                if (failure instanceof Error error) throw error;
+                if (failure != null) throw new RuntimeException("Failed to close OGG/Vorbis decoder", failure);
+            }
+        }
+
+        private void requireOpen() {
+            if (!isOpen || handle == MemoryUtil.NULL) {
+                throw new IllegalStateException("Decoder is closed");
             }
         }
     }
 
     private static int safeMul(int a, int b) {
         long v = (long) a * (long) b;
-        if (v > Integer.MAX_VALUE) {
+        if (v < 0L || v > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Buffer size overflow: " + a + " * " + b);
         }
         return (int) v;
+    }
+
+    private static int safeAdd(int a, int b) {
+        long value = (long) a + (long) b;
+        if (value < 0L || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Buffer size overflow: " + a + " + " + b);
+        }
+        return (int) value;
+    }
+
+    private static void rethrow(Throwable failure) throws Exception {
+        if (failure instanceof Exception exception) throw exception;
+        if (failure instanceof Error error) throw error;
+        throw new RuntimeException(failure);
     }
 
     private static int growCapacity(int current, int needed) {

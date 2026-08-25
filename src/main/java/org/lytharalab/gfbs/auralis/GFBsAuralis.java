@@ -43,35 +43,44 @@ public class GFBsAuralis {
 
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> {
             event.enqueueWork(() -> {
-                installJvmShutdownHook();
-                var cfg = GFBsAuralisConfig.CLIENT;
-                AuralisAL al = AuralisAL.createAndStartGlobal(AuralisAL.Config.defaultsWithHrtf(cfg.enableHrtf.get()));
-                int configuredMaxSources = cfg.maxSources.get();
-                int reserve = cfg.reserveSourcesForVanilla.get();
-                AuralisAL.SourceBudget sourceBudget = al.querySourceBudget();
-                int effectiveMaxSources = al.recommendSourcePoolLimit(configuredMaxSources, reserve);
-                AuralisEngine engine = new AuralisEngine(
-                        Minecraft.getInstance(),
-                        al,
-                        effectiveMaxSources,
-                        cfg.streamedChunkSize.get(),
-                        cfg.maxStreamedBytes.get(),
-                        cfg.attenuationExponent.get().floatValue(),
-                        cfg.volumeSmoothing.get().floatValue(),
-                        cfg.voiceMaterializeGain.get().floatValue(),
-                        cfg.voiceVirtualizeGain.get().floatValue()
-                );
-                AuralisApi.setEngine(engine);
-                LOGGER.info(
-                        "Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={}, deviceMonoSources={}, deviceStereoSources={}, voiceMaterializeGain={}, voiceVirtualizeGain={})",
-                        effectiveMaxSources,
-                        configuredMaxSources,
-                        reserve,
-                        sourceBudget.monoSources(),
-                        sourceBudget.stereoSources(),
-                        cfg.voiceMaterializeGain.get(),
-                        cfg.voiceVirtualizeGain.get()
-                );
+                try {
+                    installJvmShutdownHook();
+                    var cfg = GFBsAuralisConfig.CLIENT;
+                    AuralisAL al = AuralisAL.createAndStartGlobal(AuralisAL.Config.defaultsWithHrtf(cfg.enableHrtf.get()));
+                    int configuredMaxSources = cfg.maxSources.get();
+                    int reserve = cfg.reserveSourcesForVanilla.get();
+                    AuralisAL.SourceBudget sourceBudget = al.querySourceBudget();
+                    int effectiveMaxSources = al.recommendSourcePoolLimit(configuredMaxSources, reserve);
+                    AuralisEngine engine = new AuralisEngine(
+                            Minecraft.getInstance(),
+                            al,
+                            effectiveMaxSources,
+                            cfg.streamedChunkSize.get(),
+                            cfg.maxStreamedBytes.get(),
+                            cfg.attenuationExponent.get().floatValue(),
+                            cfg.volumeSmoothing.get().floatValue(),
+                            cfg.voiceMaterializeGain.get().floatValue(),
+                            cfg.voiceVirtualizeGain.get().floatValue()
+                    );
+                    AuralisApi.setEngine(engine);
+                    LOGGER.info(
+                            "Auralis engine initialized (client). maxSources={} (configured={}, reserveForVanilla={}, deviceMonoSources={}, deviceStereoSources={}, voiceMaterializeGain={}, voiceVirtualizeGain={})",
+                            effectiveMaxSources,
+                            configuredMaxSources,
+                            reserve,
+                            sourceBudget.monoSources(),
+                            sourceBudget.stereoSources(),
+                            cfg.voiceMaterializeGain.get(),
+                            cfg.voiceVirtualizeGain.get()
+                    );
+                } catch (Throwable startupFailure) {
+                    LOGGER.error("GFBS-Auralis client engine initialization failed; disabling Auralis for this session", startupFailure);
+                    try {
+                        AuralisAL.stopAndClearGlobal();
+                    } catch (Throwable cleanupFailure) {
+                        startupFailure.addSuppressed(cleanupFailure);
+                    }
+                }
             });
         });
     }
@@ -99,28 +108,60 @@ public class GFBsAuralis {
     )
     public static class ClientModEvents {
         public static AuralisEngine engine;
+        private static final AtomicBoolean ENGINE_RUNTIME_FAILED = new AtomicBoolean(false);
 
         @SubscribeEvent
         public static void onClientTick(TickEvent.ClientTickEvent e) {
             if (e.phase != TickEvent.Phase.END) return;
-            ClientSoundController.flushPendingIfReady();
-            var mc = Minecraft.getInstance();
-            if (mc.level != null) {
-                ClientSoundController.tickBoundPositions(mc.level, mc.level.entitiesForRendering());
-            }
-            if (AuralisApi.isInitialized()) {
-                AuralisApi.engine().tick();
+            if (ENGINE_RUNTIME_FAILED.get()) return;
+            try {
+                ClientSoundController.flushPendingIfReady();
+                var mc = Minecraft.getInstance();
+                if (mc.level != null) {
+                    ClientSoundController.tickBoundPositions(mc.level, mc.level.entitiesForRendering());
+                }
+                if (AuralisApi.isInitialized()) {
+                    AuralisApi.engine().tick();
+                }
+                ClientSoundController.pruneFinishedInstances();
+            } catch (Throwable runtimeFailure) {
+                if (runtimeFailure instanceof VirtualMachineError fatal) throw fatal;
+                if (runtimeFailure instanceof ThreadDeath fatal) throw fatal;
+                if (ENGINE_RUNTIME_FAILED.compareAndSet(false, true)) {
+                    LOGGER.error("GFBS-Auralis runtime failure; disabling the client audio engine instead of crashing the game", runtimeFailure);
+                    try {
+                        ClientSoundController.stopAll();
+                    } catch (Throwable shutdownFailure) {
+                        runtimeFailure.addSuppressed(shutdownFailure);
+                    }
+                    try {
+                        if (AuralisApi.isInitialized() && AuralisApi.engine() instanceof AuralisEngine impl) {
+                            impl.shutdown(true);
+                        } else {
+                            AuralisAL.stopAndClearGlobal();
+                        }
+                    } catch (Throwable shutdownFailure) {
+                        runtimeFailure.addSuppressed(shutdownFailure);
+                    }
+                }
             }
         }
 
         @SubscribeEvent
         public static void onClientShutdown(GameShuttingDownEvent e){
-            if (AuralisApi.isInitialized()) {
-                var eng = AuralisApi.engine();
-                if (eng instanceof AuralisEngine impl) {
-                    impl.shutdown(false);
-                } else {
+            try {
+                ClientSoundController.stopAll();
+                if (AuralisApi.isInitialized()) {
+                    var eng = AuralisApi.engine();
                     eng.shutdown();
+                }
+            } catch (Throwable shutdownFailure) {
+                LOGGER.warn("GFBS-Auralis did not shut down cleanly; forcing OpenAL teardown", shutdownFailure);
+                try {
+                    AuralisAL.stopAndClearGlobal();
+                } catch (Throwable forcedTeardownFailure) {
+                    shutdownFailure.addSuppressed(forcedTeardownFailure);
+                    LOGGER.warn("Forced Auralis OpenAL teardown also failed", forcedTeardownFailure);
                 }
             }
         }

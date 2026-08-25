@@ -28,39 +28,55 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import org.lwjgl.openal.AL10;
 import org.lytharalab.gfbs.auralis.utils.OggVorbisDecoder;
-import org.lwjgl.system.MemoryUtil;
 
 import java.io.InputStream;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.Set;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 final class SoundBufferCache {
     private record Entry(int bufferId, AtomicInteger refs) {}
 
     private final Minecraft mc;
     private final AuralisAL al;
-    // streamedChunkSize/maxStreamedBytes are no longer needed here as we don't pre-decode
+    // Streamed OGG data is kept in native memory for random access. Bound it.
     private final Map<ResourceLocation, Entry> cache = new ConcurrentHashMap<>();
     private final Map<Integer, ResourceLocation> bufferToPath = new ConcurrentHashMap<>();
     private final Map<Integer, Double> bufferDurations = new ConcurrentHashMap<>();
-    
-    private final ExecutorService asyncExecutor = Executors.newFixedThreadPool(
-            Math.max(2, Runtime.getRuntime().availableProcessors()),
-            r -> {
-                Thread t = new Thread(r, "Auralis-AsyncLoader");
-                t.setDaemon(true);
-                return t;
-            }
-    );
+    private final int maxStreamedBytes;
+
+    private final AtomicBoolean shuttingDown = new AtomicBoolean(false);
+    private final Set<CompletableFuture<?>> pendingLoads = ConcurrentHashMap.newKeySet();
+    private final ThreadPoolExecutor asyncExecutor;
 
     SoundBufferCache(Minecraft mc, AuralisAL al, int streamedChunkSize, int maxStreamedBytes) {
         this.mc = Objects.requireNonNull(mc, "mc");
         this.al = Objects.requireNonNull(al, "al");
+        this.maxStreamedBytes = Math.max(256 * 1024, maxStreamedBytes);
+
+        int processors = Runtime.getRuntime().availableProcessors();
+        int loaderThreads = Math.max(2, Math.min(4, Math.max(1, processors / 4)));
+        AtomicInteger threadIndex = new AtomicInteger(0);
+        this.asyncExecutor = new ThreadPoolExecutor(
+                loaderThreads,
+                loaderThreads,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(256),
+                task -> {
+                    Thread thread = new Thread(task, "Auralis-AsyncLoader-" + threadIndex.incrementAndGet());
+                    thread.setDaemon(true);
+                    thread.setUncaughtExceptionHandler((t, failure) ->
+                            GFBsAuralis.LOGGER.error("Uncaught failure on {}", t.getName(), failure));
+                    return thread;
+                },
+                new ThreadPoolExecutor.AbortPolicy()
+        );
     }
 
     int acquireBuffer(ResourceLocation soundPath) {
@@ -85,7 +101,7 @@ final class SoundBufferCache {
 
                     if (tryIncrement(old)) {
                         bufferDurations.remove(bufferId);
-                        al.submit(() -> AL10.alDeleteBuffers(bufferId));
+                        deleteBuffersLater(new int[] { bufferId });
                         return old.bufferId();
                     }
 
@@ -103,13 +119,16 @@ final class SoundBufferCache {
 
     CompletableFuture<Integer> acquireBufferAsync(ResourceLocation soundPath) {
         Objects.requireNonNull(soundPath, "soundPath");
+        if (shuttingDown.get()) {
+            return CompletableFuture.failedFuture(new RejectedExecutionException("Auralis audio loader is shutting down"));
+        }
 
         Entry existing = cache.get(soundPath);
         if (existing != null && tryIncrement(existing)) {
             return CompletableFuture.completedFuture(existing.bufferId());
         }
 
-        return CompletableFuture.supplyAsync(() -> {
+        return submitAsync(() -> {
             Entry e = cache.get(soundPath);
             if (e != null && tryIncrement(e)) {
                 return e.bufferId();
@@ -127,7 +146,7 @@ final class SoundBufferCache {
 
                 if (tryIncrement(old)) {
                     bufferDurations.remove(bufferId);
-                    al.submit(() -> AL10.alDeleteBuffers(bufferId));
+                    deleteBuffersLater(new int[] { bufferId });
                     return old.bufferId();
                 }
 
@@ -136,9 +155,8 @@ final class SoundBufferCache {
                     return bufferId;
                 }
             }
-        }, asyncExecutor).exceptionally(ex -> {
-            GFBsAuralis.LOGGER.error("Failed to acquire sound buffer asynchronously for: {}", soundPath, ex);
-            return -1;
+        }, bufferId -> {
+            if (bufferId != null && bufferId != -1) releaseBuffer(bufferId);
         });
     }
 
@@ -153,8 +171,8 @@ final class SoundBufferCache {
         int channels = pcm.alFormat() == AL10.AL_FORMAT_MONO16 ? 1 : 2;
         double durationSeconds = pcm.pcmData().remaining() / (double) (Math.max(1, channels) * 2 * pcm.sampleRate());
 
-        int id = al.callBlocking(() -> {
-            try {
+        try {
+            int id = al.callBlocking(() -> {
                 int bufferId = AL10.alGenBuffers();
                 if (bufferId == 0) {
                     throw new IllegalStateException("Failed to generate OpenAL buffer: " + AL10.alGetError());
@@ -166,12 +184,14 @@ final class SoundBufferCache {
                     throw new IllegalStateException("Failed to upload buffer data: " + err);
                 }
                 return bufferId;
-            } finally {
-                pcm.free();
-            }
-        });
-        bufferDurations.put(id, durationSeconds);
-        return id;
+            });
+            bufferDurations.put(id, durationSeconds);
+            return id;
+        } finally {
+            // The PCM allocation belongs to the loader, not to the queued AL task.
+            // This still runs if shutdown rejects callBlocking before the task starts.
+            pcm.free();
+        }
     }
 
     /**
@@ -186,7 +206,7 @@ final class SoundBufferCache {
             // StreamDecoder consumes the compressed file into native memory during construction,
             // so the resource stream can be closed immediately afterwards.
             try (InputStream in = r.open()) {
-                return OggVorbisDecoder.createStreamDecoder(in);
+                return OggVorbisDecoder.createStreamDecoder(in, maxStreamedBytes);
             }
         } catch (Exception e) {
             GFBsAuralis.LOGGER.error("Failed to create stream decoder for: {}", soundPath, e);
@@ -195,7 +215,12 @@ final class SoundBufferCache {
     }
     
     CompletableFuture<OggVorbisDecoder.StreamDecoder> createStreamDecoderAsync(ResourceLocation soundPath) {
-        return CompletableFuture.supplyAsync(() -> createStreamDecoder(soundPath), asyncExecutor);
+        return submitAsync(
+                () -> createStreamDecoder(soundPath),
+                decoder -> {
+                    if (decoder != null) decoder.close();
+                }
+        );
     }
 
     /**
@@ -235,28 +260,33 @@ final class SoundBufferCache {
             return;
         }
 
-        int left = entry.refs.decrementAndGet();
+        int current;
+        int left;
+        do {
+            current = entry.refs.get();
+            if (current <= 0) {
+                GFBsAuralis.LOGGER.debug("Ignoring duplicate release for OpenAL buffer {}", bufferId);
+                return;
+            }
+            left = current - 1;
+        } while (!entry.refs.compareAndSet(current, left));
         if (left == 0) {
             cache.remove(soundPath, entry);
             bufferToPath.remove(bufferId);
             bufferDurations.remove(bufferId);
-            al.submit(() -> AL10.alDeleteBuffers(bufferId));
+            deleteBuffersLater(new int[] { bufferId });
         }
     }
     
     void deleteBuffers(int[] buffers) {
         if (buffers == null || buffers.length == 0) return;
-        al.submit(() -> {
-            for (int id : buffers) {
-                if (id != 0) AL10.alDeleteBuffers(id);
-            }
-        });
+        deleteBuffersLater(buffers);
     }
 
     void clearAll() {
         for (Entry e : cache.values()) {
             int id = e.bufferId();
-            al.submit(() -> AL10.alDeleteBuffers(id));
+            deleteBuffersLater(new int[] { id });
         }
         cache.clear();
         bufferToPath.clear();
@@ -269,14 +299,94 @@ final class SoundBufferCache {
     }
 
     void shutdown() {
+        if (!shuttingDown.compareAndSet(false, true)) return;
+
         asyncExecutor.shutdown();
+        boolean terminated = false;
+        try {
+            terminated = asyncExecutor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        if (!terminated) {
+            GFBsAuralis.LOGGER.warn(
+                    "Auralis async loaders did not stop within 5 seconds; cancelling {} pending load(s)",
+                    pendingLoads.size()
+            );
+            for (CompletableFuture<?> pending : pendingLoads) {
+                pending.cancel(false);
+            }
+            asyncExecutor.shutdownNow();
+        }
+        pendingLoads.clear();
+    }
+
+    private <T> CompletableFuture<T> submitAsync(Supplier<T> supplier, Consumer<T> cleanup) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        if (shuttingDown.get()) {
+            result.completeExceptionally(new RejectedExecutionException("Auralis audio loader is shutting down"));
+            return result;
+        }
+
+        pendingLoads.add(result);
+        try {
+            asyncExecutor.execute(() -> {
+                T value = null;
+                boolean produced = false;
+                try {
+                    if (shuttingDown.get()) {
+                        throw new CancellationException("Auralis audio loader is shutting down");
+                    }
+                    value = supplier.get();
+                    produced = true;
+                    if (shuttingDown.get()) {
+                        produced = false;
+                        cleanup.accept(value);
+                        result.completeExceptionally(new CancellationException("Auralis audio loader shut down during load"));
+                    } else if (!result.complete(value)) {
+                        produced = false;
+                        cleanup.accept(value);
+                    }
+                } catch (Throwable failure) {
+                    if (produced) {
+                        try {
+                            cleanup.accept(value);
+                        } catch (Throwable cleanupFailure) {
+                            failure.addSuppressed(cleanupFailure);
+                        }
+                    }
+                    result.completeExceptionally(failure);
+                } finally {
+                    pendingLoads.remove(result);
+                }
+            });
+        } catch (RejectedExecutionException rejected) {
+            pendingLoads.remove(result);
+            result.completeExceptionally(rejected);
+        }
+        return result;
+    }
+
+    private void deleteBuffersLater(int[] buffers) {
+        try {
+            al.submit(() -> {
+                for (int id : buffers) {
+                    if (id != 0) AL10.alDeleteBuffers(id);
+                }
+            });
+        } catch (RuntimeException rejectedDuringShutdown) {
+            GFBsAuralis.LOGGER.debug(
+                    "Unable to queue OpenAL buffer deletion during shutdown; the owning context will reclaim it: {}",
+                    rejectedDuringShutdown.getMessage()
+            );
+        }
     }
 
     private boolean tryIncrement(Entry entry) {
         int c;
         do {
             c = entry.refs.get();
-            if (c <= 0) return false;
+            if (c <= 0 || c == Integer.MAX_VALUE) return false;
         } while (!entry.refs.compareAndSet(c, c + 1));
         return true;
     }

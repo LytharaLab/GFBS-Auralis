@@ -17,6 +17,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 import org.lwjgl.openal.AL10;
+import org.lytharalab.gfbs.auralis.api.AuralisApi;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
 import org.lytharalab.gfbs.auralis.api.IAuralisEngine;
 import org.lytharalab.gfbs.auralis.api.event.SoundCreatedEvent;
@@ -26,9 +27,12 @@ import org.lytharalab.gfbs.auralis.core.AuralisPluginManager;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class AuralisEngine implements IAuralisEngine {
     private static final float DEFAULT_VOICE_MATERIALIZE_GAIN = 0.0010f;
@@ -45,6 +49,11 @@ public final class AuralisEngine implements IAuralisEngine {
     private final int streamedChunkSize;
 
     private final ConcurrentMap<AuralisSoundInstance, AuralisSoundInstanceImpl> instances = new ConcurrentHashMap<>();
+    private final Set<CompletableFuture<?>> pendingCreations = ConcurrentHashMap.newKeySet();
+    private final Object lifecycleLock = new Object();
+    private final AtomicBoolean shuttingDown = new AtomicBoolean(false);
+    private final AtomicBoolean shutdownComplete = new AtomicBoolean(false);
+    private final AtomicBoolean stopOpenALRequested = new AtomicBoolean(false);
 
     /**
      * Backwards-compatible constructor retained for integrations compiled against
@@ -143,14 +152,20 @@ public final class AuralisEngine implements IAuralisEngine {
     private AuralisSoundInstance create(SoundEvent soundEvent, boolean streamed) {
         Objects.requireNonNull(soundEvent, "soundEvent");
         ResourceLocation eventId = soundEvent.getLocation();
+        AuralisSoundInstanceImpl inst = null;
 
         try {
+            ensureAcceptingCreations();
             ResourceLocation soundPath = resolveSoundPath(eventId);
 
-            AuralisSoundInstanceImpl inst;
             if (streamed) {
                 var decoder = bufferCache.createStreamDecoder(soundPath);
-                inst = new AuralisSoundInstanceImpl(al, decoder, streamedChunkSize, bufferCache, sourcePool);
+                try {
+                    inst = new AuralisSoundInstanceImpl(al, decoder, streamedChunkSize, bufferCache, sourcePool);
+                } catch (Throwable constructionFailure) {
+                    decoder.close();
+                    throw constructionFailure;
+                }
             } else {
                 int bufferId = bufferCache.acquireBuffer(soundPath);
                 if (bufferId == -1) {
@@ -159,14 +174,18 @@ public final class AuralisEngine implements IAuralisEngine {
                 inst = new AuralisSoundInstanceImpl(al, bufferId, bufferCache, sourcePool);
             }
 
-            configureNewInstance(inst, soundEvent);
-            instances.put(inst, inst);
+            synchronized (lifecycleLock) {
+                ensureAcceptingCreations();
+                configureNewInstance(inst, soundEvent);
+                instances.put(inst, inst);
+            }
             return inst;
-        } catch (Exception e) {
-            GFBsAuralis.LOGGER.error("Failed to create sound instance for: {} ;E: {}", eventId, e.getMessage());
-            AuralisSoundInstanceImpl fallback = new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool);
-            instances.put(fallback, fallback);
-            return fallback;
+        } catch (Throwable failure) {
+            cleanupFailedCreation(inst, failure);
+            if (!shuttingDown.get()) {
+                GFBsAuralis.LOGGER.error("Failed to create sound instance for: {}", eventId, failure);
+            }
+            return createFallbackInstance();
         }
     }
 
@@ -175,43 +194,85 @@ public final class AuralisEngine implements IAuralisEngine {
         ResourceLocation eventId = soundEvent.getLocation();
 
         try {
+            ensureAcceptingCreations();
             ResourceLocation soundPath = resolveSoundPath(eventId);
 
             CompletableFuture<AuralisSoundInstanceImpl> futureInst;
             if (streamed) {
-                futureInst = bufferCache.createStreamDecoderAsync(soundPath)
-                        .thenApply(decoder -> new AuralisSoundInstanceImpl(
-                                al,
-                                decoder,
-                                streamedChunkSize,
-                                bufferCache,
-                                sourcePool
-                        ));
+                CompletableFuture<org.lytharalab.gfbs.auralis.utils.OggVorbisDecoder.StreamDecoder> decoderFuture =
+                        bufferCache.createStreamDecoderAsync(soundPath);
+                futureInst = decoderFuture
+                        .thenApply(decoder -> {
+                            try {
+                                return new AuralisSoundInstanceImpl(
+                                        al,
+                                        decoder,
+                                        streamedChunkSize,
+                                        bufferCache,
+                                        sourcePool
+                                );
+                            } catch (RuntimeException | Error constructionFailure) {
+                                decoder.close();
+                                throw constructionFailure;
+                            }
+                        });
             } else {
-                futureInst = bufferCache.acquireBufferAsync(soundPath)
+                CompletableFuture<Integer> bufferFuture = bufferCache.acquireBufferAsync(soundPath);
+                futureInst = bufferFuture
                         .thenApply(bufferId -> {
                             if (bufferId == -1) {
                                 throw new RuntimeException("Failed to acquire valid buffer for sound: " + soundPath);
                             }
-                            return new AuralisSoundInstanceImpl(al, bufferId, bufferCache, sourcePool);
+                            try {
+                                return new AuralisSoundInstanceImpl(al, bufferId, bufferCache, sourcePool);
+                            } catch (RuntimeException | Error constructionFailure) {
+                                bufferCache.releaseBuffer(bufferId);
+                                throw constructionFailure;
+                            }
                         });
             }
 
-            return futureInst.thenApply(inst -> {
-                configureNewInstance(inst, soundEvent);
-                instances.put(inst, inst);
-                return (AuralisSoundInstance) inst;
-            }).exceptionally(ex -> {
-                GFBsAuralis.LOGGER.error("Failed to create sound instance asynchronously for: {} ;E: {}", eventId, ex.getMessage());
-                AuralisSoundInstanceImpl fallback = new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool);
-                instances.put(fallback, fallback);
-                return fallback;
+            CompletableFuture<AuralisSoundInstance> result = futureInst.handle((inst, failure) -> {
+                if (failure != null) {
+                    if (shuttingDown.get()) throw new CancellationException("Auralis engine is shutting down");
+                    GFBsAuralis.LOGGER.error("Failed to create sound instance asynchronously for: {}", eventId, failure);
+                    return createFallbackInstance();
+                }
+
+                try {
+                    synchronized (lifecycleLock) {
+                        ensureAcceptingCreations();
+                        configureNewInstance(inst, soundEvent);
+                        instances.put(inst, inst);
+                    }
+                    return (AuralisSoundInstance) inst;
+                } catch (Throwable registrationFailure) {
+                    cleanupFailedCreation(inst, registrationFailure);
+                    if (shuttingDown.get()) throw new CancellationException("Auralis engine is shutting down");
+                    GFBsAuralis.LOGGER.error("Failed to register asynchronous sound instance for: {}", eventId, registrationFailure);
+                    return createFallbackInstance();
+                }
             });
-        } catch (Exception e) {
-            GFBsAuralis.LOGGER.error("Failed to create sound instance for: {} ;E: {}", eventId, e.getMessage());
-            AuralisSoundInstanceImpl fallback = new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool);
-            instances.put(fallback, fallback);
-            return CompletableFuture.completedFuture(fallback);
+
+            pendingCreations.add(result);
+            result.whenComplete((ignored, failure) -> {
+                pendingCreations.remove(result);
+                if (result.isCancelled()) {
+                    // CompletableFuture cancellation does not propagate ownership
+                    // cleanup upstream. Let loading finish and dispose whatever it
+                    // produced instead of orphaning a decoder or cache reference.
+                    CancellationException cancellation = new CancellationException("Auralis sound creation was cancelled");
+                    futureInst.whenComplete((inst, upstreamFailure) -> {
+                        if (inst != null) cleanupFailedCreation(inst, cancellation);
+                    });
+                }
+            });
+            return result;
+        } catch (Throwable failure) {
+            if (!shuttingDown.get()) {
+                GFBsAuralis.LOGGER.error("Failed to start sound instance creation for: {}", eventId, failure);
+            }
+            return CompletableFuture.completedFuture(createFallbackInstance());
         }
     }
 
@@ -269,6 +330,7 @@ public final class AuralisEngine implements IAuralisEngine {
 
     @Override
     public void tick() {
+        if (shuttingDown.get()) return;
         Camera cam = mc.gameRenderer.getMainCamera();
         Vec3 listenerPos = cam.getPosition();
         float pitch = cam.getXRot();
@@ -333,31 +395,82 @@ public final class AuralisEngine implements IAuralisEngine {
     }
 
     public void shutdown(boolean stopOpenAL) {
-        // Stop logical voices and release their physical sources first.
-        for (AuralisSoundInstanceImpl inst : instances.values()) {
-            try {
-                inst.stop();
-            } catch (Throwable ignored) {
+        if (stopOpenAL) stopOpenALRequested.set(true);
+        synchronized (lifecycleLock) {
+            if (!shuttingDown.compareAndSet(false, true)) {
+                if (stopOpenALRequested.get() && shutdownComplete.get()) {
+                    AuralisAL.stopAndClearGlobal();
+                }
+                return;
             }
         }
 
-        // Delete the source pool before deleting any buffers still known to instances.
-        sourcePool.close();
+        for (CompletableFuture<?> pending : pendingCreations) {
+            pending.cancel(false);
+        }
+
+        // Stop loader production while OpenAL is still available, so late results
+        // can release their decoder/buffer ownership safely.
+        try {
+            bufferCache.shutdown();
+        } catch (Throwable failure) {
+            GFBsAuralis.LOGGER.warn("Failed to stop Auralis async loaders cleanly", failure);
+        }
 
         for (AuralisSoundInstanceImpl inst : instances.values()) {
             try {
-                inst.markDisposedAfterSourcePoolShutdown();
-                inst.freeBuffers();
-            } catch (Throwable ignored) {
+                inst.forceStopAndFree();
+            } catch (Throwable failure) {
+                GFBsAuralis.LOGGER.warn("Failed to dispose Auralis voice during shutdown", failure);
             }
         }
         instances.clear();
 
-        pluginManager.shutdown();
-        bufferCache.clearAll();
-        bufferCache.shutdown();
-        if (stopOpenAL) {
-            AuralisAL.stopAndClearGlobal();
+        try {
+            sourcePool.close();
+        } catch (Throwable failure) {
+            GFBsAuralis.LOGGER.warn("Failed to close Auralis OpenAL source pool", failure);
+        }
+
+        try {
+            bufferCache.clearAll();
+            // Barrier behind all asynchronous buffer deletions submitted above.
+            al.executeBlocking(() -> { });
+        } catch (Throwable failure) {
+            GFBsAuralis.LOGGER.warn("Failed to clear Auralis sound buffer cache", failure);
+        }
+
+        try {
+            pluginManager.shutdown();
+        } catch (Throwable failure) {
+            GFBsAuralis.LOGGER.warn("Failed to shut down an Auralis plugin cleanly", failure);
+        } finally {
+            pendingCreations.clear();
+            AuralisApi.clearEngine(this);
+            shutdownComplete.set(true);
+            if (stopOpenALRequested.get()) {
+                AuralisAL.stopAndClearGlobal();
+            }
+        }
+    }
+
+    private void ensureAcceptingCreations() {
+        if (shuttingDown.get() || shutdownComplete.get()) {
+            throw new CancellationException("Auralis engine is shutting down");
+        }
+    }
+
+    private AuralisSoundInstanceImpl createFallbackInstance() {
+        return new AuralisSoundInstanceImpl(al, -1, bufferCache, sourcePool);
+    }
+
+    private void cleanupFailedCreation(@Nullable AuralisSoundInstanceImpl inst, Throwable originalFailure) {
+        if (inst == null) return;
+        instances.remove(inst);
+        try {
+            inst.disposeExplicitly();
+        } catch (Throwable cleanupFailure) {
+            originalFailure.addSuppressed(cleanupFailure);
         }
     }
 
