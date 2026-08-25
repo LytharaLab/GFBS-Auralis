@@ -23,16 +23,27 @@ package org.lytharalab.gfbs.auralis.api;
  */
 import net.minecraft.sounds.SoundEvent;
 import org.jetbrains.annotations.Nullable;
+import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
+import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectRegistry;
+import org.lytharalab.gfbs.auralis.api.openal.OpenALAccess;
+import org.lytharalab.gfbs.auralis.api.plugin.AuralisPlugin;
+import org.lytharalab.gfbs.auralis.api.plugin.AuralisPluginService;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class AuralisApi {
     private static volatile @Nullable IAuralisEngine ENGINE;
+    private static final Map<String, AuralisPlugin> REGISTERED_PLUGINS = new ConcurrentHashMap<>();
 
     private AuralisApi() {}
 
     public static synchronized void setEngine(IAuralisEngine engine) {
         ENGINE = java.util.Objects.requireNonNull(engine, "engine");
+        if (!REGISTERED_PLUGINS.isEmpty()) {
+            engine.plugins().loadAll(REGISTERED_PLUGINS.values());
+        }
     }
 
     /** Clear the engine only if it is still the instance being shut down. */
@@ -57,6 +68,64 @@ public final class AuralisApi {
 
     public static boolean isInitialized() {
         return ENGINE != null;
+    }
+
+    public static AudioBusSystem buses() { return engine().buses(); }
+    public static AuralisEffectRegistry effects() { return engine().effects(); }
+    public static AuralisPluginService plugins() { return engine().plugins(); }
+    public static OpenALAccess openAL() { return engine().openAL(); }
+
+    /**
+     * Registers a plugin safely before or after client-engine initialization.
+     * Forge mods may call this from client setup without relying on ServiceLoader.
+     */
+    public static boolean registerPlugin(AuralisPlugin plugin) {
+        java.util.Objects.requireNonNull(plugin, "plugin");
+        String id = normalizePluginId(plugin.getId());
+        AuralisPlugin previous = REGISTERED_PLUGINS.putIfAbsent(id, plugin);
+        if (previous != null && previous != plugin) {
+            throw new IllegalArgumentException("Auralis plugin id already registered: " + id);
+        }
+        if (previous == plugin) return false;
+        IAuralisEngine engine = ENGINE;
+        if (engine == null) return true;
+        boolean loaded = engine.plugins().load(plugin);
+        if (loaded) {
+            // A newly enabled dependency may unblock registrations accepted
+            // earlier in the runtime.
+            engine.plugins().loadAll(REGISTERED_PLUGINS.values());
+        }
+        return loaded;
+    }
+
+    /** Removes a queued registration and unloads its active plugin instance. */
+    public static boolean unregisterPlugin(String pluginId) {
+        String id = normalizePluginId(pluginId);
+        boolean removed = REGISTERED_PLUGINS.remove(id) != null;
+        IAuralisEngine engine = ENGINE;
+        return engine != null ? engine.plugins().unload(id) || removed : removed;
+    }
+
+    /**
+     * Retries queued explicit registrations after another discovery source has
+     * loaded. This resolves dependencies that cross the explicit/ServiceLoader
+     * boundary without exposing the mutable registration collection.
+     */
+    public static int loadRegisteredPlugins() {
+        IAuralisEngine engine = ENGINE;
+        return engine == null || REGISTERED_PLUGINS.isEmpty()
+                ? 0
+                : engine.plugins().loadAll(REGISTERED_PLUGINS.values());
+    }
+
+    private static String normalizePluginId(String pluginId) {
+        String id = java.util.Objects.requireNonNull(pluginId, "pluginId")
+                .trim()
+                .toLowerCase(java.util.Locale.ROOT);
+        if (id.isEmpty() || id.length() > 128 || !id.matches("[a-z0-9_.-]+:[a-z0-9_./-]+")) {
+            throw new IllegalArgumentException("Plugin id must be namespaced (namespace:path): " + pluginId);
+        }
+        return id;
     }
 
     public static AuralisSoundInstance create(SoundEvent soundEvent) {

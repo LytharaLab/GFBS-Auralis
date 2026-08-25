@@ -1,5 +1,6 @@
 package org.lytharalab.gfbs.auralis.core;
 
+import org.lytharalab.gfbs.auralis.GFBsAuralis;
 import org.lytharalab.gfbs.auralis.api.event.AuralisEvent;
 import org.lytharalab.gfbs.auralis.api.event.AuralisEventBus;
 
@@ -15,6 +16,8 @@ public class AuralisEventBusImpl implements AuralisEventBus {
     @Override
     @SuppressWarnings("unchecked")
     public <T extends AuralisEvent> void register(Class<T> eventClass, Consumer<T> handler) {
+        java.util.Objects.requireNonNull(eventClass, "eventClass");
+        java.util.Objects.requireNonNull(handler, "handler");
         listeners.computeIfAbsent(eventClass, k -> new CopyOnWriteArrayList<>())
                 .add((Consumer<AuralisEvent>) handler);
     }
@@ -30,16 +33,26 @@ public class AuralisEventBusImpl implements AuralisEventBus {
     @Override
     @SuppressWarnings("unchecked")
     public void post(AuralisEvent event) {
-        List<Consumer<? extends AuralisEvent>> list = listeners.get(event.getClass());
-        if (list != null) {
-            for (Consumer<? extends AuralisEvent> handler : list) {
+        java.util.Objects.requireNonNull(event, "event");
+        for (Map.Entry<Class<? extends AuralisEvent>, List<Consumer<? extends AuralisEvent>>> entry : listeners.entrySet()) {
+            if (!entry.getKey().isAssignableFrom(event.getClass())) continue;
+            for (Consumer<? extends AuralisEvent> handler : entry.getValue()) {
                 try {
                     ((Consumer<AuralisEvent>) handler).accept(event);
-                } catch (Exception e) {
-                    System.err.println("[Auralis] Error handling event " + event.getClass().getSimpleName());
-                    e.printStackTrace();
+                } catch (Throwable failure) {
+                    if (failure instanceof VirtualMachineError fatal) throw fatal;
+                    if (failure instanceof ThreadDeath fatal) throw fatal;
+                    GFBsAuralis.LOGGER.error(
+                            "Auralis event handler failed for {} and was isolated",
+                            event.getClass().getSimpleName(),
+                            failure
+                    );
                 }
             }
         }
+    }
+
+    public void clear() {
+        listeners.clear();
     }
 }

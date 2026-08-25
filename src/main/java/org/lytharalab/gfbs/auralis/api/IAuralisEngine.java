@@ -22,6 +22,10 @@ package org.lytharalab.gfbs.auralis.api;
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 import net.minecraft.sounds.SoundEvent;
+import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
+import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectRegistry;
+import org.lytharalab.gfbs.auralis.api.openal.OpenALAccess;
+import org.lytharalab.gfbs.auralis.api.plugin.AuralisPluginService;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -48,6 +52,22 @@ public interface IAuralisEngine {
 
     /** Playing voices currently virtualized without an OpenAL Source. */
     default int getVirtualVoiceCount() { return 0; }
+
+    default AudioBusSystem buses() {
+        throw new UnsupportedOperationException("Audio buses require Auralis 2.2.0");
+    }
+
+    default AuralisEffectRegistry effects() {
+        throw new UnsupportedOperationException("Effects require Auralis 2.2.0");
+    }
+
+    default AuralisPluginService plugins() {
+        throw new UnsupportedOperationException("Plugin service requires Auralis 2.2.0");
+    }
+
+    default OpenALAccess openAL() {
+        throw new UnsupportedOperationException("OpenAL access requires Auralis 2.2.0");
+    }
 
     void shutdown();
 }

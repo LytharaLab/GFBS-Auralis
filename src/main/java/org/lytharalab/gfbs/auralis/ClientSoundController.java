@@ -16,6 +16,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.lytharalab.gfbs.auralis.api.AuralisApi;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
+import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
 import org.lytharalab.gfbs.auralis.network.TweenControlPacket;
 import org.lytharalab.gfbs.auralis.tween.EasingDirection;
 import org.lytharalab.gfbs.auralis.tween.EasingStyle;
@@ -40,6 +41,7 @@ public final class ClientSoundController {
 
     private static final Map<String, AuralisSoundInstance> INSTANCES = new ConcurrentHashMap<>();
     private static final Map<String, BindTarget> BINDINGS = new ConcurrentHashMap<>();
+    private static final Map<String, String> BUS_ASSIGNMENTS = new ConcurrentHashMap<>();
     private static final Map<String, Long> PLAY_GENERATIONS = new ConcurrentHashMap<>();
     private static final Map<String, CompletableFuture<AuralisSoundInstance>> PENDING_CREATIONS = new ConcurrentHashMap<>();
     private static final AtomicLong NEXT_PLAY_GENERATION = new AtomicLong(0L);
@@ -116,7 +118,7 @@ public final class ClientSoundController {
     ) {
         SoundEvent soundEvent = BuiltInRegistries.SOUND_EVENT.get(soundEventId);
         if (soundEvent == null) {
-            PLAY_GENERATIONS.remove(id, generation);
+            clearFailedGeneration(id, generation, null);
             GFBsAuralis.LOGGER.error("[Auralis] Unknown SoundEvent id: {}", soundEventId);
             return;
         }
@@ -173,7 +175,7 @@ public final class ClientSoundController {
 
         SoundEvent soundEvent = BuiltInRegistries.SOUND_EVENT.get(soundEventId);
         if (soundEvent == null) {
-            PLAY_GENERATIONS.remove(id, generation);
+            clearFailedGeneration(id, generation, null);
             GFBsAuralis.LOGGER.error("[Auralis] Unknown SoundEvent id: {}", soundEventId);
             return;
         }
@@ -199,7 +201,7 @@ public final class ClientSoundController {
                 ));
             } else {
                 PENDING_PLAY_SIZE.decrementAndGet();
-                PLAY_GENERATIONS.remove(id, generation);
+                clearFailedGeneration(id, generation, null);
                 GFBsAuralis.LOGGER.warn("[Auralis] Pending play queue is full; dropping sound id={}", id);
             }
             return;
@@ -262,7 +264,10 @@ public final class ClientSoundController {
                 synchronized (STATE_LOCK) {
                     PENDING_CREATIONS.remove(id, creation);
                     wasCurrent = isCurrentGeneration(id, generation);
-                    if (wasCurrent) PLAY_GENERATIONS.remove(id, generation);
+                    if (wasCurrent) {
+                        PLAY_GENERATIONS.remove(id, generation);
+                        BUS_ASSIGNMENTS.remove(id);
+                    }
                 }
                 if (!creation.isCancelled() && wasCurrent) {
                     GFBsAuralis.LOGGER.error("[Auralis] Failed to create sound instance: {}", id, failure);
@@ -301,6 +306,7 @@ public final class ClientSoundController {
         CompletableFuture<AuralisSoundInstance> pending;
         synchronized (STATE_LOCK) {
             BINDINGS.remove(id);
+            BUS_ASSIGNMENTS.remove(id);
             PLAY_GENERATIONS.remove(id);
             pending = PENDING_CREATIONS.remove(id);
             inst = INSTANCES.remove(id);
@@ -354,6 +360,20 @@ public final class ClientSoundController {
         if (inst != null) inst.setMaxDistance(Math.max(0.01f, distance));
     }
 
+    /** Stores the route even while asynchronous sound creation is still pending. */
+    public static void setBus(String id, String busName) {
+        Objects.requireNonNull(id, "id");
+        String route = Objects.requireNonNull(busName, "busName").trim();
+        BUS_ASSIGNMENTS.put(id, route);
+        AuralisSoundInstance inst = INSTANCES.get(id);
+        if (inst == null) return;
+        try {
+            inst.setBus(route);
+        } catch (IllegalArgumentException missingBus) {
+            GFBsAuralis.LOGGER.warn("Cannot route sound {} to unknown Auralis bus {}", id, route);
+        }
+    }
+
     public static AuralisSoundInstance getInstance(String id) {
         return INSTANCES.get(id);
     }
@@ -368,6 +388,7 @@ public final class ClientSoundController {
                 if (INSTANCES.remove(entry.getKey(), instance)) {
                     PLAY_GENERATIONS.remove(entry.getKey());
                     BINDINGS.remove(entry.getKey());
+                    BUS_ASSIGNMENTS.remove(entry.getKey());
                     finished.add(instance);
                 }
             }
@@ -507,6 +528,7 @@ public final class ClientSoundController {
         List<AuralisSoundInstance> active;
         synchronized (STATE_LOCK) {
             BINDINGS.clear();
+            BUS_ASSIGNMENTS.clear();
             PLAY_GENERATIONS.clear();
             PENDING_PLAY.clear();
             PENDING_PLAY_SIZE.set(0);
@@ -552,6 +574,17 @@ public final class ClientSoundController {
                     .setPriority(priority)
                     .setMinDistance(minDistance)
                     .setMaxDistance(maxDistance);
+            String assignedBus = BUS_ASSIGNMENTS.getOrDefault(id, AudioBusSystem.MASTER);
+            try {
+                instance.setBus(assignedBus);
+            } catch (IllegalArgumentException missingBus) {
+                GFBsAuralis.LOGGER.warn(
+                        "Auralis bus {} is not available while activating {}; using Master",
+                        assignedBus, id
+                );
+                BUS_ASSIGNMENTS.put(id, AudioBusSystem.MASTER);
+                instance.setBus(AudioBusSystem.MASTER);
+            }
         } catch (Throwable configurationFailure) {
             clearFailedGeneration(id, generation, creation);
             disposeInstance(instance);
@@ -606,7 +639,7 @@ public final class ClientSoundController {
     ) {
         synchronized (STATE_LOCK) {
             if (creation != null) PENDING_CREATIONS.remove(id, creation);
-            PLAY_GENERATIONS.remove(id, generation);
+            if (PLAY_GENERATIONS.remove(id, generation)) BUS_ASSIGNMENTS.remove(id);
         }
     }
 

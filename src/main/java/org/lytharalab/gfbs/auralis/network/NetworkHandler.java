@@ -33,7 +33,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class NetworkHandler {
-    private static final String PROTOCOL_VERSION = "2";
+    private static final String PROTOCOL_VERSION = "3";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(GFBsAuralis.MODID, "gfbs_auralis_main"),
             () -> PROTOCOL_VERSION,
@@ -56,6 +56,7 @@ public class NetworkHandler {
         registerMessage(TweenControlPacket.class, TweenControlPacket::encode, TweenControlPacket::decode, TweenControlPacket::handle);
 
         registerMessage(BindControlPacket.class, BindControlPacket::encode, BindControlPacket::decode, BindControlPacket::handle);
+        registerMessage(BusControlPacket.class, BusControlPacket::encode, BusControlPacket::decode, BusControlPacket::handle);
     }
 
     private static <MSG> void registerMessage(Class<MSG> messageType,

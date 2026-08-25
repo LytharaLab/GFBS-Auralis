@@ -9,7 +9,7 @@ import java.nio.ByteBuffer;
  * 典型的应用包括：均衡器 (EQ)、混响、变声器、动态音量调整等。
  * </p>
  */
-public interface AudioProcessor {
+public interface AudioProcessor extends AutoCloseable {
     /**
      * 处理音频数据
      * <p>
@@ -58,4 +58,14 @@ public interface AudioProcessor {
      * @return 优先级数值
      */
     default int getPriority() { return 0; }
+
+    /** Increment when parameters change and static buffers must be rebuilt. */
+    default long getRevision() { return 0L; }
+
+    /** Reset delay lines/envelopes before a decoder seek or replay. */
+    default void reset() { }
+
+    /** Release processor-owned native/direct resources. */
+    @Override
+    default void close() { }
 }

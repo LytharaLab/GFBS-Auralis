@@ -28,9 +28,11 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import org.lwjgl.openal.AL10;
 import org.lytharalab.gfbs.auralis.utils.OggVorbisDecoder;
+import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
 
 import java.io.InputStream;
 import java.util.Map;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.*;
@@ -41,6 +43,18 @@ import java.util.function.Supplier;
 
 final class SoundBufferCache {
     private record Entry(int bufferId, AtomicInteger refs) {}
+
+    /**
+     * PCM builds own processor objects until the worker actually exits. A
+     * cosmetic future cancellation must therefore never masquerade as task
+     * completion and let a voice close a processor that is still executing.
+     */
+    private static final class NonCancellingFuture<T> extends CompletableFuture<T> {
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            return false;
+        }
+    }
 
     private final Minecraft mc;
     private final AuralisAL al;
@@ -224,6 +238,27 @@ final class SoundBufferCache {
     }
 
     /**
+     * Builds a unique, processor-specific static buffer off the client/audio
+     * thread. The returned buffer is not cached and must be deleted by its voice.
+     */
+    CompletableFuture<Integer> createProcessedBufferAsync(int baseBufferId, List<AudioProcessor> processors) {
+        ResourceLocation soundPath = bufferToPath.get(baseBufferId);
+        if (soundPath == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Unknown base OpenAL buffer: " + baseBufferId)
+            );
+        }
+        List<AudioProcessor> chain = List.copyOf(processors);
+        return submitAsync(
+                () -> loadProcessedBufferSync(soundPath, chain),
+                id -> {
+                    if (id != null && id != 0) deleteBuffersLater(new int[] {id});
+                },
+                new NonCancellingFuture<>()
+        );
+    }
+
+    /**
      * Creates a set of empty OpenAL buffers for streaming.
      */
     int[] createStreamingBuffers(int count) {
@@ -280,6 +315,7 @@ final class SoundBufferCache {
     
     void deleteBuffers(int[] buffers) {
         if (buffers == null || buffers.length == 0) return;
+        for (int id : buffers) bufferDurations.remove(id);
         deleteBuffersLater(buffers);
     }
 
@@ -296,6 +332,71 @@ final class SoundBufferCache {
     double getBufferDurationSeconds(int bufferId) {
         if (bufferId < 0) return 0.0;
         return bufferDurations.getOrDefault(bufferId, 0.0);
+    }
+
+    private int loadProcessedBufferSync(ResourceLocation soundPath, List<AudioProcessor> processors) {
+        DecodedPcm pcm = decode(soundPath);
+        if (pcm == null) throw new IllegalStateException("Failed to decode sound for PCM processing: " + soundPath);
+
+        try {
+            java.nio.ByteBuffer data = pcm.pcmData();
+            int channels = pcm.alFormat() == AL10.AL_FORMAT_MONO16 ? 1 : 2;
+            int frameBytes = Math.max(1, channels * 2);
+            int position = data.position();
+            int currentBytes = data.remaining();
+
+            for (AudioProcessor processor : processors) {
+                try {
+                    if (!processor.isEnabled()) continue;
+                    int newBytes;
+                    synchronized (processor) {
+                        processor.reset();
+                        newBytes = processor.process(data, channels, pcm.sampleRate(), currentBytes);
+                    }
+                    // A faulty third-party processor may alter position/limit.
+                    // Restore a valid window before validating its byte count so
+                    // one bad DSP implementation cannot poison the remaining chain.
+                    data.limit(data.capacity());
+                    data.position(position);
+                    int available = data.capacity() - position;
+                    if (newBytes < 0 || newBytes > available || (newBytes % frameBytes) != 0) {
+                        GFBsAuralis.LOGGER.error(
+                                "Static audio processor {} returned invalid byte count {}; bypassing its size change",
+                                safeProcessorId(processor), newBytes
+                        );
+                        data.limit(position + currentBytes);
+                        continue;
+                    }
+                    currentBytes = newBytes;
+                    data.limit(position + currentBytes);
+                } catch (Throwable failure) {
+                    data.limit(data.capacity());
+                    data.position(position);
+                    data.limit(position + currentBytes);
+                    GFBsAuralis.LOGGER.error(
+                            "Static audio processor {} failed; remaining chain will continue",
+                            safeProcessorId(processor), failure
+                    );
+                }
+            }
+            if (currentBytes <= 0) throw new IllegalStateException("PCM processor chain produced an empty sound: " + soundPath);
+
+            int id = al.callBlocking(() -> {
+                int bufferId = AL10.alGenBuffers();
+                if (bufferId == 0) throw new IllegalStateException("Failed to allocate processed OpenAL buffer");
+                AL10.alBufferData(bufferId, pcm.alFormat(), data, pcm.sampleRate());
+                int error = AL10.alGetError();
+                if (error != AL10.AL_NO_ERROR) {
+                    AL10.alDeleteBuffers(bufferId);
+                    throw new IllegalStateException("Failed to upload processed buffer: " + error);
+                }
+                return bufferId;
+            });
+            bufferDurations.put(id, currentBytes / (double) (frameBytes * pcm.sampleRate()));
+            return id;
+        } finally {
+            pcm.free();
+        }
     }
 
     void shutdown() {
@@ -322,7 +423,14 @@ final class SoundBufferCache {
     }
 
     private <T> CompletableFuture<T> submitAsync(Supplier<T> supplier, Consumer<T> cleanup) {
-        CompletableFuture<T> result = new CompletableFuture<>();
+        return submitAsync(supplier, cleanup, new CompletableFuture<>());
+    }
+
+    private <T> CompletableFuture<T> submitAsync(
+            Supplier<T> supplier,
+            Consumer<T> cleanup,
+            CompletableFuture<T> result
+    ) {
         if (shuttingDown.get()) {
             result.completeExceptionally(new RejectedExecutionException("Auralis audio loader is shutting down"));
             return result;
@@ -407,6 +515,14 @@ final class SoundBufferCache {
             throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to decode OGG: " + soundPath + " ;E: " + e);
+        }
+    }
+
+    private static String safeProcessorId(AudioProcessor processor) {
+        try {
+            return String.valueOf(processor.getId());
+        } catch (Throwable ignored) {
+            return processor.getClass().getName();
         }
     }
 }

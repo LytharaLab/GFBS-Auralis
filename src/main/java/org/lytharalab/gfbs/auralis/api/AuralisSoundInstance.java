@@ -24,6 +24,8 @@ package org.lytharalab.gfbs.auralis.api;
 import net.minecraft.world.phys.Vec3;
 import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
 
+import java.util.List;
+
 public interface AuralisSoundInstance {
     static void bind(AuralisSoundInstance instance) {
         AuralisApi.engine().bind(instance);
@@ -51,6 +53,18 @@ public interface AuralisSoundInstance {
      * @return this
      */
     AuralisSoundInstance addProcessor(AudioProcessor processor);
+
+    default AuralisSoundInstance removeProcessor(AudioProcessor processor) {
+        return this;
+    }
+
+    default AuralisSoundInstance clearProcessors() {
+        return this;
+    }
+
+    default List<AudioProcessor> getProcessors() {
+        return List.of();
+    }
 
     /**
      * Returns whether this logical instance currently owns a physical OpenAL Source.
@@ -129,6 +143,15 @@ public interface AuralisSoundInstance {
     AuralisSoundInstance setPriority(int priority);
 
     int getPriority();
+
+    /** Route this voice into a named hierarchical audio bus. */
+    default AuralisSoundInstance setBus(String busName) {
+        return this;
+    }
+
+    default String getBus() {
+        return org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem.MASTER;
+    }
 
     AuralisSoundInstance addListener(AuralisSoundListener listener);
 

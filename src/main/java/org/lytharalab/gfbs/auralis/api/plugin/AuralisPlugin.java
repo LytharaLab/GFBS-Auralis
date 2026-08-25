@@ -1,5 +1,7 @@
 package org.lytharalab.gfbs.auralis.api.plugin;
 
+import java.util.Set;
+
 /**
  * 插件生命周期接口
  * <p>
@@ -34,4 +36,20 @@ public interface AuralisPlugin {
      * @return 插件版本号
      */
     String getVersion();
+
+    /** Stable namespaced plugin id. Legacy plugins fall back to their name. */
+    default String getId() {
+        String name = getName().trim().toLowerCase(java.util.Locale.ROOT);
+        return name.contains(":") ? name : "external:" + name.replaceAll("[^a-z0-9_.-]", "_");
+    }
+
+    /** Required plugin ids that must already be enabled. */
+    default Set<String> getRequiredPlugins() {
+        return Set.of();
+    }
+
+    /** Lower values load first when no dependency edge decides the order. */
+    default int getLoadPriority() {
+        return 0;
+    }
 }

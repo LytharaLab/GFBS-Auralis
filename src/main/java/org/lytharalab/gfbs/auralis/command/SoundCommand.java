@@ -25,6 +25,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.PacketDistributor;
 import org.lytharalab.gfbs.auralis.network.BindControlPacket;
+import org.lytharalab.gfbs.auralis.network.BusControlPacket;
 import org.lytharalab.gfbs.auralis.network.NetworkHandler;
 import org.lytharalab.gfbs.auralis.network.SoundControlPacket;
 import org.lytharalab.gfbs.auralis.network.TweenControlPacket;
@@ -193,6 +194,50 @@ public final class SoundCommand {
                         )
                 );
 
+        ArgumentBuilder<CommandSourceStack, ?> busCmd = Commands.literal("bus");
+
+        ArgumentBuilder<CommandSourceStack, ?> createParent = busTerminal(
+                Commands.argument("parent", StringArgumentType.word()),
+                BusControlPacket.Action.CREATE_BUS
+        );
+        ArgumentBuilder<CommandSourceStack, ?> createName = Commands.argument("bus", StringArgumentType.word());
+        createName.then(createParent);
+        ArgumentBuilder<CommandSourceStack, ?> createBus = Commands.literal("create");
+        createBus.then(createName);
+        busCmd.then(createBus);
+
+        ArgumentBuilder<CommandSourceStack, ?> removeName = busTerminal(
+                Commands.argument("bus", StringArgumentType.word()),
+                BusControlPacket.Action.REMOVE_BUS
+        );
+        ArgumentBuilder<CommandSourceStack, ?> removeBus = Commands.literal("remove");
+        removeBus.then(removeName);
+        busCmd.then(removeBus);
+
+        ArgumentBuilder<CommandSourceStack, ?> parentTarget = busTerminal(
+                Commands.argument("parent", StringArgumentType.word()),
+                BusControlPacket.Action.SET_PARENT
+        );
+        ArgumentBuilder<CommandSourceStack, ?> parentName = Commands.argument("bus", StringArgumentType.word());
+        parentName.then(parentTarget);
+        ArgumentBuilder<CommandSourceStack, ?> setParent = Commands.literal("parent");
+        setParent.then(parentName);
+        busCmd.then(setParent);
+
+        ArgumentBuilder<CommandSourceStack, ?> volumeValue = busTerminal(
+                Commands.argument("value", FloatArgumentType.floatArg(0.0f, 16.0f)),
+                BusControlPacket.Action.SET_VOLUME
+        );
+        ArgumentBuilder<CommandSourceStack, ?> volumeName = Commands.argument("bus", StringArgumentType.word());
+        volumeName.then(volumeValue);
+        ArgumentBuilder<CommandSourceStack, ?> setBusVolume = Commands.literal("volume");
+        setBusVolume.then(volumeName);
+        busCmd.then(setBusVolume);
+
+        busCmd.then(busFlagCommand("mute", BusControlPacket.Action.SET_MUTED));
+        busCmd.then(busFlagCommand("solo", BusControlPacket.Action.SET_SOLO));
+        busCmd.then(busFlagCommand("bypass-effects", BusControlPacket.Action.SET_EFFECTS_BYPASSED));
+
         dispatcher.register(Commands.literal("gfbs_auralis")
                         .requires(source -> source.hasPermission(2))
 
@@ -294,6 +339,12 @@ public final class SoundCommand {
                                 .executes(ctx -> setMinDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "min-distance"), null))
                                 .then(Commands.argument("targets", EntityArgument.players())
                                         .executes(ctx -> setMinDistance(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "min-distance"), EntityArgument.getPlayers(ctx, "targets")))))))
+                        .then(Commands.literal("bus")
+                .then(Commands.argument("id", StringArgumentType.string())
+                        .then(Commands.argument("bus", StringArgumentType.word())
+                                .executes(ctx -> setBus(ctx, StringArgumentType.getString(ctx, "id"), StringArgumentType.getString(ctx, "bus"), null))
+                                .then(Commands.argument("targets", EntityArgument.players())
+                                        .executes(ctx -> setBus(ctx, StringArgumentType.getString(ctx, "id"), StringArgumentType.getString(ctx, "bus"), EntityArgument.getPlayers(ctx, "targets")))))))
                         .then(Commands.literal("max-distance")
                 .then(Commands.argument("id", StringArgumentType.string())
                         .then(Commands.argument("max-distance", FloatArgumentType.floatArg(0.0f))
@@ -312,6 +363,7 @@ public final class SoundCommand {
                 )
                 .then(bindCmd)
                 .then(unbindCmd)
+                .then(busCmd)
         );
     }
 
@@ -666,6 +718,99 @@ public final class SoundCommand {
         int finalSent = sent;
         ctx.getSource().sendSuccess(() -> Component.literal("[GFBS Auralis] 已向 " + finalSent + " 名玩家设置最大距离 (id=" + id + ", maxDistance=" + maxDistance + ")"), false);
         return 1;
+    }
+
+    private static int setBus(
+            CommandContext<CommandSourceStack> ctx,
+            String id,
+            String bus,
+            Collection<ServerPlayer> explicitTargets
+    ) {
+        BusControlPacket packet = new BusControlPacket(
+                BusControlPacket.Action.SET_INSTANCE_BUS,
+                id,
+                bus,
+                0f,
+                false
+        );
+        return sendBusOperation(ctx, packet, explicitTargets, "已将音源 " + id + " 路由到总线 " + bus);
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> busFlagCommand(
+            String literal,
+            BusControlPacket.Action action
+    ) {
+        ArgumentBuilder<CommandSourceStack, ?> value = busTerminal(
+                Commands.argument("value", BoolArgumentType.bool()),
+                action
+        );
+        ArgumentBuilder<CommandSourceStack, ?> bus = Commands.argument("bus", StringArgumentType.word());
+        bus.then(value);
+        ArgumentBuilder<CommandSourceStack, ?> command = Commands.literal(literal);
+        command.then(bus);
+        return command;
+    }
+
+    private static ArgumentBuilder<CommandSourceStack, ?> busTerminal(
+            ArgumentBuilder<CommandSourceStack, ?> terminal,
+            BusControlPacket.Action action
+    ) {
+        terminal.executes(ctx -> manageBus(ctx, action, null));
+        terminal.then(Commands.argument("targets", EntityArgument.players())
+                .executes(ctx -> manageBus(ctx, action, EntityArgument.getPlayers(ctx, "targets"))));
+        return terminal;
+    }
+
+    private static int manageBus(
+            CommandContext<CommandSourceStack> ctx,
+            BusControlPacket.Action action,
+            Collection<ServerPlayer> explicitTargets
+    ) {
+        String bus = StringArgumentType.getString(ctx, "bus");
+        String parent = switch (action) {
+            case CREATE_BUS, SET_PARENT -> StringArgumentType.getString(ctx, "parent");
+            default -> "Master";
+        };
+        float value = action == BusControlPacket.Action.SET_VOLUME
+                ? FloatArgumentType.getFloat(ctx, "value")
+                : 0.0f;
+        boolean flag = switch (action) {
+            case SET_MUTED, SET_SOLO, SET_EFFECTS_BYPASSED -> BoolArgumentType.getBool(ctx, "value");
+            default -> false;
+        };
+        BusControlPacket packet = new BusControlPacket(action, bus, parent, value, flag);
+        String detail = switch (action) {
+            case CREATE_BUS -> "创建总线 " + bus + " → " + parent;
+            case REMOVE_BUS -> "移除总线 " + bus;
+            case SET_PARENT -> "设置总线 " + bus + " → " + parent;
+            case SET_VOLUME -> "设置总线 " + bus + " 音量为 " + value;
+            case SET_MUTED -> "设置总线 " + bus + " 静音=" + flag;
+            case SET_SOLO -> "设置总线 " + bus + " 独奏=" + flag;
+            case SET_EFFECTS_BYPASSED -> "设置总线 " + bus + " 效果旁路=" + flag;
+            case SET_INSTANCE_BUS -> "";
+        };
+        return sendBusOperation(ctx, packet, explicitTargets, detail);
+    }
+
+    private static int sendBusOperation(
+            CommandContext<CommandSourceStack> ctx,
+            BusControlPacket packet,
+            Collection<ServerPlayer> explicitTargets,
+            String detail
+    ) {
+        Collection<ServerPlayer> targets = resolveTargets(ctx, explicitTargets);
+        if (targets == null) return 0;
+        int sent = 0;
+        for (ServerPlayer player : targets) {
+            NetworkHandler.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
+            sent++;
+        }
+        int finalSent = sent;
+        ctx.getSource().sendSuccess(
+                () -> Component.literal("[GFBS Auralis] " + detail + "（" + finalSent + " 名玩家）"),
+                false
+        );
+        return sent;
     }
 
     private static int tween(CommandContext<CommandSourceStack> ctx, TweenControlPacket.Property property, Collection<ServerPlayer> explicitTargets) {
