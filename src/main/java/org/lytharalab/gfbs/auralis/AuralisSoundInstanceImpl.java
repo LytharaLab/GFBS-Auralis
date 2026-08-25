@@ -182,7 +182,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         OpenALSourcePool.SourceHandle handle = source;
         if (handle != null) {
             final int sourceId = handle.sourceId();
-            al.submit(() -> {
+            submitALTask(() -> {
                 if (source == handle) {
                     AL10.alSourcePause(sourceId);
                 }
@@ -209,15 +209,10 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         // STOP -> UNBIND event ordering compatible with natural completion.
         boolean hadPhysicalSource = source != null;
         releasePhysicalVoice(false);
-
-        if (isStreamed && streamDecoder != null) {
-            al.submit(() -> {
-                try {
-                    streamDecoder.seekStart();
-                } catch (Throwable ignored) {
-                }
-            });
-        }
+        // Do not queue a decoder seek here. The logical cursor is already reset,
+        // and the next materialization seeks to it before playback. The old queued
+        // seek could run after unbind() closed the native STB handle, causing the
+        // fatal stb_vorbis_seek_start use-after-free captured in the JVM crash log.
 
         fireEvent(AuralisSoundEvent.STOP);
         if (hadPhysicalSource) {
@@ -352,7 +347,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         OpenALSourcePool.SourceHandle handle = source;
         if (handle != null && !isStreamed) {
             final int sourceId = handle.sourceId();
-            al.submit(() -> {
+            submitALTask(() -> {
                 if (source == handle) {
                     AL10.alSourcei(sourceId, AL10.AL_LOOPING, looping ? AL10.AL_TRUE : AL10.AL_FALSE);
                 }
@@ -422,6 +417,10 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     boolean isDisposed() {
         return disposed.get() || resourcesFreed.get();
+    }
+
+    boolean hasPlayableResource() {
+        return isStreamed ? streamDecoder != null : alBuffer != -1;
     }
 
     boolean isLogicallyActive() {
@@ -693,7 +692,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         OpenALSourcePool.SourceHandle handle = source;
         if (handle == null) return;
         final int sourceId = handle.sourceId();
-        al.submit(() -> {
+        submitALTask(() -> {
             if (source == handle) {
                 applyNonGainParams(sourceId);
             }
@@ -874,11 +873,20 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 int pos = decodeBuffer.position();
                 int newBytes = processor.process(decodeBuffer, channels, rate, currentBytes);
                 decodeBuffer.position(pos);
+                int maximumBytes = decodeBuffer.capacity() - pos;
+                int frameBytes = Math.max(1, channels * 2);
+                if (newBytes < 0 || newBytes > maximumBytes || (newBytes % frameBytes) != 0) {
+                    throw new IllegalStateException(
+                            "Audio processor returned invalid byte count " + newBytes
+                                    + " (available=" + maximumBytes + ", frameBytes=" + frameBytes + ")"
+                    );
+                }
                 if (newBytes != currentBytes) {
                     decodeBuffer.limit(pos + newBytes);
                     currentBytes = newBytes;
                 }
             }
+            if (currentBytes == 0) return false;
         }
 
         AL10.alBufferData(bufferId, streamDecoder.getAlFormat(), decodeBuffer, streamDecoder.getSampleRate());
@@ -956,19 +964,64 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         if (!resourcesFreed.compareAndSet(false, true)) return;
 
         if (isStreamed) {
-            if (streamDecoder != null) {
-                streamDecoder.close();
+            final int[] buffers;
+            synchronized (sourceLifecycleLock) {
+                buffers = streamingBuffers;
+                streamingBuffers = null;
             }
-            if (decodeBuffer != null) {
-                MemoryUtil.memFree(decodeBuffer);
-            }
-            int[] buffers = streamingBuffers;
-            streamingBuffers = null;
-            if (buffers != null) {
-                bufferCache.deleteBuffers(buffers);
+
+            try {
+                // This is a barrier behind every previously accepted stream update.
+                // Decoder state, its decode workspace, and OpenAL stream buffers are
+                // all released by their sole owner thread, never by a render/network
+                // thread racing an in-flight native call.
+                al.executeBlocking(() -> freeStreamResourcesOnALThread(buffers));
+            } catch (Throwable t) {
+                // Leaking a little native memory during a broken/late shutdown is
+                // safer than freeing it concurrently and crashing the entire JVM.
+                GFBsAuralis.LOGGER.warn(
+                        "Unable to serialize streamed resource cleanup on the OpenAL thread; resources will be reclaimed at process exit",
+                        t
+                );
             }
         } else if (alBuffer != -1) {
             bufferCache.releaseBuffer(alBuffer);
+        }
+    }
+
+    private void freeStreamResourcesOnALThread(@Nullable int[] buffers) {
+        Throwable failure = null;
+        try {
+            if (streamDecoder != null) streamDecoder.close();
+        } catch (Throwable t) {
+            failure = t;
+        }
+        try {
+            if (decodeBuffer != null) MemoryUtil.memFree(decodeBuffer);
+        } catch (Throwable t) {
+            if (failure == null) failure = t; else failure.addSuppressed(t);
+        }
+        if (buffers != null) {
+            for (int bufferId : buffers) {
+                if (bufferId == 0) continue;
+                try {
+                    AL10.alDeleteBuffers(bufferId);
+                } catch (Throwable t) {
+                    if (failure == null) failure = t; else failure.addSuppressed(t);
+                }
+            }
+        }
+
+        if (failure instanceof RuntimeException runtime) throw runtime;
+        if (failure instanceof Error error) throw error;
+        if (failure != null) throw new RuntimeException("Failed to release streamed audio resources", failure);
+    }
+
+    private void submitALTask(Runnable task) {
+        try {
+            al.submit(task);
+        } catch (RuntimeException rejectedDuringShutdown) {
+            GFBsAuralis.LOGGER.debug("Ignoring late Auralis OpenAL update during shutdown: {}", rejectedDuringShutdown.getMessage());
         }
     }
 

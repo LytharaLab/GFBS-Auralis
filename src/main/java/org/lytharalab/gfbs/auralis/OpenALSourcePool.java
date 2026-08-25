@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Pool of scarce physical OpenAL sources.
@@ -35,6 +36,7 @@ final class OpenALSourcePool implements AutoCloseable {
     private final Set<SourceHandle> inUse = new HashSet<>();
     private final Set<SourceHandle> allSources = new HashSet<>();
     final Map<SourceHandle, AuralisSoundInstanceImpl> sourceToInstance = new ConcurrentHashMap<>();
+    private final AtomicBoolean closed = new AtomicBoolean(false);
     private int generatedCount = 0;
     private int adaptiveMaxSources;
 
@@ -50,6 +52,7 @@ final class OpenALSourcePool implements AutoCloseable {
     }
 
     @Nullable SourceHandle acquire(AuralisSoundInstanceImpl instance) {
+        if (closed.get()) return null;
         SourceHandle handle = tryAcquire(instance);
         if (handle == null) {
             synchronized (lock) {
@@ -62,6 +65,7 @@ final class OpenALSourcePool implements AutoCloseable {
     private @Nullable SourceHandle tryAcquire(AuralisSoundInstanceImpl instance) {
         SourceHandle reused;
         synchronized (lock) {
+            if (closed.get()) return null;
             reused = free.pollFirst();
             if (reused != null) {
                 sourceToInstance.put(reused, instance);
@@ -102,10 +106,24 @@ final class OpenALSourcePool implements AutoCloseable {
         }
 
         SourceHandle created = new SourceHandle(id);
+        boolean discard;
         synchronized (lock) {
-            allSources.add(created);
-            sourceToInstance.put(created, instance);
-            inUse.add(created);
+            discard = closed.get();
+            if (discard) {
+                generatedCount = Math.max(0, generatedCount - 1);
+            } else {
+                allSources.add(created);
+                sourceToInstance.put(created, instance);
+                inUse.add(created);
+            }
+        }
+        if (discard) {
+            final int discardedSourceId = id;
+            try {
+                al.executeBlocking(() -> AL10.alDeleteSources(discardedSourceId));
+            } catch (Throwable ignored) {
+            }
+            return null;
         }
         return created;
     }
@@ -115,6 +133,7 @@ final class OpenALSourcePool implements AutoCloseable {
         synchronized (lock) {
             sourceToInstance.remove(handle);
             if (!inUse.remove(handle)) return;
+            if (closed.get()) return;
             free.addLast(handle);
             sourcesRecycledCount++;
         }
@@ -197,6 +216,7 @@ final class OpenALSourcePool implements AutoCloseable {
 
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
         List<SourceHandle> all;
         synchronized (lock) {
             all = new ArrayList<>(allSources);

@@ -31,8 +31,15 @@ public final class AuralisApi {
 
     private AuralisApi() {}
 
-    public static void setEngine(IAuralisEngine engine) {
-        ENGINE = engine;
+    public static synchronized void setEngine(IAuralisEngine engine) {
+        ENGINE = java.util.Objects.requireNonNull(engine, "engine");
+    }
+
+    /** Clear the engine only if it is still the instance being shut down. */
+    public static synchronized boolean clearEngine(IAuralisEngine expected) {
+        if (ENGINE != expected) return false;
+        ENGINE = null;
+        return true;
     }
 
     public static IAuralisEngine engine() {
@@ -53,31 +60,35 @@ public final class AuralisApi {
     }
 
     public static AuralisSoundInstance create(SoundEvent soundEvent) {
-        if (ENGINE == null) {
+        IAuralisEngine engine = ENGINE;
+        if (engine == null) {
             return new ServerPlaceholderSoundInstance();
         }
-        return engine().create(soundEvent);
+        return engine.create(soundEvent);
     }
 
     public static AuralisSoundInstance createStreamed(SoundEvent soundEvent) {
-        if (ENGINE == null) {
+        IAuralisEngine engine = ENGINE;
+        if (engine == null) {
             return new ServerPlaceholderSoundInstance();
         }
-        return engine().createStreamed(soundEvent);
+        return engine.createStreamed(soundEvent);
     }
 
     public static CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent) {
-        if (ENGINE == null) {
+        IAuralisEngine engine = ENGINE;
+        if (engine == null) {
             return CompletableFuture.completedFuture(new ServerPlaceholderSoundInstance());
         }
-        return engine().createAsync(soundEvent);
+        return engine.createAsync(soundEvent);
     }
 
     public static CompletableFuture<AuralisSoundInstance> createStreamedAsync(SoundEvent soundEvent) {
-        if (ENGINE == null) {
+        IAuralisEngine engine = ENGINE;
+        if (engine == null) {
             return CompletableFuture.completedFuture(new ServerPlaceholderSoundInstance());
         }
-        return engine().createStreamedAsync(soundEvent);
+        return engine.createStreamedAsync(soundEvent);
     }
 
     static class ServerPlaceholderSoundInstance implements AuralisSoundInstance {

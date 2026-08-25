@@ -23,11 +23,15 @@ import org.lytharalab.gfbs.auralis.tween.ForgeTweenHook;
 import org.lytharalab.gfbs.auralis.tween.TweenInfo;
 
 import java.util.UUID;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.annotation.Nullable;
 
@@ -36,6 +40,10 @@ public final class ClientSoundController {
 
     private static final Map<String, AuralisSoundInstance> INSTANCES = new ConcurrentHashMap<>();
     private static final Map<String, BindTarget> BINDINGS = new ConcurrentHashMap<>();
+    private static final Map<String, Long> PLAY_GENERATIONS = new ConcurrentHashMap<>();
+    private static final Map<String, CompletableFuture<AuralisSoundInstance>> PENDING_CREATIONS = new ConcurrentHashMap<>();
+    private static final AtomicLong NEXT_PLAY_GENERATION = new AtomicLong(0L);
+    private static final Object STATE_LOCK = new Object();
     private static final int MAX_PENDING_PLAY = 2048;
 
     public sealed interface BindTarget {
@@ -47,6 +55,7 @@ public final class ClientSoundController {
 
     private record PendingPlay(
             String id,
+            long generation,
             ResourceLocation soundEventId,
             float volume,
             float pitch,
@@ -67,8 +76,13 @@ public final class ClientSoundController {
             PendingPlay p = PENDING_PLAY.poll();
             if (p == null) break;
             PENDING_PLAY_SIZE.decrementAndGet();
+            if (!isCurrentGeneration(p.id, p.generation)) {
+                drained++;
+                continue;
+            }
             playInternal(
                     p.id,
+                    p.generation,
                     p.soundEventId,
                     p.volume,
                     p.pitch,
@@ -87,6 +101,7 @@ public final class ClientSoundController {
 
     private static void playInternal(
             String id,
+            long generation,
             ResourceLocation soundEventId,
             float volume,
             float pitch,
@@ -101,33 +116,26 @@ public final class ClientSoundController {
     ) {
         SoundEvent soundEvent = BuiltInRegistries.SOUND_EVENT.get(soundEventId);
         if (soundEvent == null) {
+            PLAY_GENERATIONS.remove(id, generation);
             GFBsAuralis.LOGGER.error("[Auralis] Unknown SoundEvent id: {}", soundEventId);
             return;
         }
 
-        AuralisSoundInstance instance;
-        if (isStreamed) {
-            instance = AuralisApi.createStreamed(soundEvent);
-        } else {
-            instance = AuralisApi.create(soundEvent);
-        }
-        
-        if (instance != null) {
-            instance
-                    .setVolume(volume)
-                    .setPitch(pitch)
-                    .setSpeed(speed)
-                    .setStatic(isStatic)
-                    .setPosition(position)
-                    .setLooping(looping)
-                    .setPriority(priority)
-                    .setMinDistance(minDistance)
-                    .setMaxDistance(maxDistance);
-
-            AuralisSoundInstance.bind(instance);
-            instance.play();
-            INSTANCES.put(id, instance);
-        }
+        startAsyncCreation(
+                id,
+                generation,
+                soundEvent,
+                volume,
+                pitch,
+                speed,
+                isStatic,
+                position,
+                looping,
+                priority,
+                minDistance,
+                maxDistance,
+                isStreamed
+        );
     }
 
     public static void play(
@@ -152,28 +160,31 @@ public final class ClientSoundController {
         float minD = Math.max(0.01f, minDistance);
         float maxD = Math.max(minD, maxDistance);
 
-        // Stop+unbind any previous instance with same id
-        AuralisSoundInstance old = INSTANCES.remove(id);
-        if (old != null) {
-            try {
-                old.stop();
-            } catch (Throwable ignored) {}
-            try {
-                AuralisSoundInstance.unbind(old);
-            } catch (Throwable ignored) {}
+        long generation = NEXT_PLAY_GENERATION.incrementAndGet();
+        AuralisSoundInstance old;
+        CompletableFuture<AuralisSoundInstance> oldPending;
+        synchronized (STATE_LOCK) {
+            PLAY_GENERATIONS.put(id, generation);
+            old = INSTANCES.remove(id);
+            oldPending = PENDING_CREATIONS.remove(id);
         }
+        if (oldPending != null) oldPending.cancel(false);
+        disposeInstance(old);
 
         SoundEvent soundEvent = BuiltInRegistries.SOUND_EVENT.get(soundEventId);
         if (soundEvent == null) {
+            PLAY_GENERATIONS.remove(id, generation);
             GFBsAuralis.LOGGER.error("[Auralis] Unknown SoundEvent id: {}", soundEventId);
             return;
         }
 
         // If engine isn't initialized yet (e.g. early login), this becomes a no-op placeholder.
         if (!AuralisApi.isInitialized()) {
-            if (PENDING_PLAY_SIZE.get() < MAX_PENDING_PLAY) {
+            int pendingSize = PENDING_PLAY_SIZE.incrementAndGet();
+            if (pendingSize <= MAX_PENDING_PLAY) {
                 PENDING_PLAY.offer(new PendingPlay(
                         id,
+                        generation,
                         soundEventId,
                         volume,
                         pitch,
@@ -186,60 +197,98 @@ public final class ClientSoundController {
                         maxD,
                         isStreamed
                 ));
-                PENDING_PLAY_SIZE.incrementAndGet();
+            } else {
+                PENDING_PLAY_SIZE.decrementAndGet();
+                PLAY_GENERATIONS.remove(id, generation);
+                GFBsAuralis.LOGGER.warn("[Auralis] Pending play queue is full; dropping sound id={}", id);
             }
             return;
         }
 
-        if (isStreamed) {
-            AuralisApi.createStreamedAsync(soundEvent)
-                    .thenAccept(instance -> {
-                        if (instance == null) return;
-                        
-                        instance
-                                .setVolume(volume)
-                                .setPitch(pitch)
-                                .setSpeed(speed)
-                                .setStatic(isStatic)
-                                .setPosition(position)
-                                .setLooping(looping)
-                                .setPriority(priority)
-                                .setMinDistance(minD)
-                                .setMaxDistance(maxD);
+        startAsyncCreation(
+                id,
+                generation,
+                soundEvent,
+                volume,
+                pitch,
+                speed,
+                isStatic,
+                position,
+                looping,
+                priority,
+                minD,
+                maxD,
+                isStreamed
+        );
+    }
 
-                        AuralisSoundInstance.bind(instance);
-                        instance.play();
-                        INSTANCES.put(id, instance);
-                    })
-                    .exceptionally(ex -> {
-                        GFBsAuralis.LOGGER.error("[Auralis] Failed to create streamed sound instance: {}", id, ex);
-                        return null;
-                    });
-        } else {
-            AuralisApi.createAsync(soundEvent)
-                    .thenAccept(instance -> {
-                        if (instance == null) return;
-                        
-                        instance
-                                .setVolume(volume)
-                                .setPitch(pitch)
-                                .setSpeed(speed)
-                                .setStatic(isStatic)
-                                .setPosition(position)
-                                .setLooping(looping)
-                                .setPriority(priority)
-                                .setMinDistance(minD)
-                                .setMaxDistance(maxD);
-
-                        AuralisSoundInstance.bind(instance);
-                        instance.play();
-                        INSTANCES.put(id, instance);
-                    })
-                    .exceptionally(ex -> {
-                        GFBsAuralis.LOGGER.error("[Auralis] Failed to create sound instance: {}", id, ex);
-                        return null;
-                    });
+    private static void startAsyncCreation(
+            String id,
+            long generation,
+            SoundEvent soundEvent,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 position,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance,
+            boolean isStreamed
+    ) {
+        final CompletableFuture<AuralisSoundInstance> creation;
+        try {
+            creation = isStreamed
+                    ? AuralisApi.createStreamedAsync(soundEvent)
+                    : AuralisApi.createAsync(soundEvent);
+        } catch (Throwable startFailure) {
+            clearFailedGeneration(id, generation, null);
+            GFBsAuralis.LOGGER.error("[Auralis] Failed to start sound creation: {}", id, startFailure);
+            return;
         }
+
+        synchronized (STATE_LOCK) {
+            if (!isCurrentGeneration(id, generation)) {
+                creation.cancel(false);
+                return;
+            }
+            PENDING_CREATIONS.put(id, creation);
+        }
+
+        creation.whenComplete((instance, failure) -> {
+            if (failure != null) {
+                boolean wasCurrent;
+                synchronized (STATE_LOCK) {
+                    PENDING_CREATIONS.remove(id, creation);
+                    wasCurrent = isCurrentGeneration(id, generation);
+                    if (wasCurrent) PLAY_GENERATIONS.remove(id, generation);
+                }
+                if (!creation.isCancelled() && wasCurrent) {
+                    GFBsAuralis.LOGGER.error("[Auralis] Failed to create sound instance: {}", id, failure);
+                }
+                return;
+            }
+            if (instance == null) {
+                clearFailedGeneration(id, generation, creation);
+                return;
+            }
+            activateIfCurrent(
+                    id,
+                    generation,
+                    creation,
+                    instance,
+                    volume,
+                    pitch,
+                    speed,
+                    isStatic,
+                    position,
+                    looping,
+                    priority,
+                    minDistance,
+                    maxDistance
+            );
+        });
     }
 
     public static void pause(String id) {
@@ -248,16 +297,16 @@ public final class ClientSoundController {
     }
 
     public static void stop(String id) {
-        BINDINGS.remove(id);
-        AuralisSoundInstance inst = INSTANCES.remove(id);
-        if (inst == null) return;
-        try {
-            inst.stop();
-        } finally {
-            try {
-                AuralisSoundInstance.unbind(inst);
-            } catch (Throwable ignored) {}
+        AuralisSoundInstance inst;
+        CompletableFuture<AuralisSoundInstance> pending;
+        synchronized (STATE_LOCK) {
+            BINDINGS.remove(id);
+            PLAY_GENERATIONS.remove(id);
+            pending = PENDING_CREATIONS.remove(id);
+            inst = INSTANCES.remove(id);
         }
+        if (pending != null) pending.cancel(false);
+        disposeInstance(inst);
     }
 
     public static void setVolume(String id, float volume) {
@@ -307,6 +356,23 @@ public final class ClientSoundController {
 
     public static AuralisSoundInstance getInstance(String id) {
         return INSTANCES.get(id);
+    }
+
+    /** Remove controller references after one-shot voices finish naturally. */
+    public static void pruneFinishedInstances() {
+        List<AuralisSoundInstance> finished = new ArrayList<>();
+        synchronized (STATE_LOCK) {
+            for (Map.Entry<String, AuralisSoundInstance> entry : INSTANCES.entrySet()) {
+                AuralisSoundInstance instance = entry.getValue();
+                if (instance.isPlaying() || instance.isPaused()) continue;
+                if (INSTANCES.remove(entry.getKey(), instance)) {
+                    PLAY_GENERATIONS.remove(entry.getKey());
+                    BINDINGS.remove(entry.getKey());
+                    finished.add(instance);
+                }
+            }
+        }
+        for (AuralisSoundInstance instance : finished) disposeInstance(instance);
     }
 
     public static void bindEntity(String id, int entityId, UUID entityUuid) {
@@ -437,20 +503,128 @@ public final class ClientSoundController {
     }
 
     public static void stopAll() {
-        BINDINGS.clear();
-        // Clear pending plays first
-        PENDING_PLAY.clear();
-        PENDING_PLAY_SIZE.set(0);
-
-        // Stop all active instances
-        for (AuralisSoundInstance inst : INSTANCES.values()) {
-            try {
-                inst.stop();
-            } catch (Throwable ignored) {}
-            try {
-                AuralisSoundInstance.unbind(inst);
-            } catch (Throwable ignored) {}
+        List<CompletableFuture<AuralisSoundInstance>> pending;
+        List<AuralisSoundInstance> active;
+        synchronized (STATE_LOCK) {
+            BINDINGS.clear();
+            PLAY_GENERATIONS.clear();
+            PENDING_PLAY.clear();
+            PENDING_PLAY_SIZE.set(0);
+            pending = new ArrayList<>(PENDING_CREATIONS.values());
+            PENDING_CREATIONS.clear();
+            active = new ArrayList<>(INSTANCES.values());
+            INSTANCES.clear();
         }
-        INSTANCES.clear();
+        for (CompletableFuture<AuralisSoundInstance> creation : pending) creation.cancel(false);
+        for (AuralisSoundInstance inst : active) disposeInstance(inst);
+    }
+
+    private static void activateIfCurrent(
+            String id,
+            long generation,
+            @Nullable CompletableFuture<AuralisSoundInstance> creation,
+            AuralisSoundInstance instance,
+            float volume,
+            float pitch,
+            float speed,
+            boolean isStatic,
+            Vec3 position,
+            boolean looping,
+            int priority,
+            float minDistance,
+            float maxDistance
+    ) {
+        if (instance instanceof AuralisSoundInstanceImpl impl && !impl.hasPlayableResource()) {
+            clearFailedGeneration(id, generation, creation);
+            disposeInstance(instance);
+            GFBsAuralis.LOGGER.warn("[Auralis] Sound instance has no playable audio resource: {}", id);
+            return;
+        }
+
+        try {
+            instance
+                    .setVolume(volume)
+                    .setPitch(pitch)
+                    .setSpeed(speed)
+                    .setStatic(isStatic)
+                    .setPosition(position)
+                    .setLooping(looping)
+                    .setPriority(priority)
+                    .setMinDistance(minDistance)
+                    .setMaxDistance(maxDistance);
+        } catch (Throwable configurationFailure) {
+            clearFailedGeneration(id, generation, creation);
+            disposeInstance(instance);
+            GFBsAuralis.LOGGER.error("[Auralis] Failed to configure sound instance: {}", id, configurationFailure);
+            return;
+        }
+
+        boolean stale;
+        synchronized (STATE_LOCK) {
+            stale = !isCurrentGeneration(id, generation)
+                    || (creation != null && PENDING_CREATIONS.get(id) != creation);
+            if (creation != null) PENDING_CREATIONS.remove(id, creation);
+        }
+
+        if (stale) {
+            disposeInstance(instance);
+            return;
+        }
+
+        Throwable activationFailure = null;
+        try {
+            AuralisSoundInstance.bind(instance);
+            instance.play();
+        } catch (Throwable failure) {
+            activationFailure = failure;
+        }
+
+        synchronized (STATE_LOCK) {
+            stale = activationFailure != null || !isCurrentGeneration(id, generation);
+            if (stale) {
+                PLAY_GENERATIONS.remove(id, generation);
+            } else {
+                INSTANCES.put(id, instance);
+            }
+        }
+
+        if (stale) disposeInstance(instance);
+        if (activationFailure != null) {
+            GFBsAuralis.LOGGER.error("[Auralis] Failed to activate sound instance: {}", id, activationFailure);
+        }
+    }
+
+    private static boolean isCurrentGeneration(String id, long generation) {
+        Long current = PLAY_GENERATIONS.get(id);
+        return current != null && current == generation;
+    }
+
+    private static void clearFailedGeneration(
+            String id,
+            long generation,
+            @Nullable CompletableFuture<AuralisSoundInstance> creation
+    ) {
+        synchronized (STATE_LOCK) {
+            if (creation != null) PENDING_CREATIONS.remove(id, creation);
+            PLAY_GENERATIONS.remove(id, generation);
+        }
+    }
+
+    private static void disposeInstance(@Nullable AuralisSoundInstance instance) {
+        if (instance == null) return;
+        try {
+            instance.stop();
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (instance instanceof AuralisSoundInstanceImpl impl && impl.isDisposed()) return;
+            if (AuralisApi.isInitialized()) {
+                AuralisSoundInstance.unbind(instance);
+            } else if (instance instanceof AuralisSoundInstanceImpl directInstance) {
+                directInstance.disposeExplicitly();
+            }
+        } catch (Throwable failure) {
+            GFBsAuralis.LOGGER.debug("[Auralis] Failed to dispose sound instance cleanly: {}", failure.getMessage());
+        }
     }
 }

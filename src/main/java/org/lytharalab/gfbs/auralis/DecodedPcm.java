@@ -24,11 +24,13 @@ package org.lytharalab.gfbs.auralis;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class DecodedPcm {
     private final int alFormat;
     private final int sampleRate;
     private final ByteBuffer pcmData;
+    private final AtomicBoolean freed = new AtomicBoolean(false);
 
     public DecodedPcm(int alFormat, int sampleRate, ByteBuffer pcmData) {
         this.alFormat = alFormat;
@@ -41,6 +43,8 @@ public final class DecodedPcm {
     ByteBuffer pcmData() { return pcmData; }
 
     void free() {
-        MemoryUtil.memFree(pcmData);
+        if (freed.compareAndSet(false, true)) {
+            MemoryUtil.memFree(pcmData);
+        }
     }
 }

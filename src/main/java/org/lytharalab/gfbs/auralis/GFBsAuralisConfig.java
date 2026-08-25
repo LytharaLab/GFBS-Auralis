@@ -83,7 +83,7 @@ public class GFBsAuralisConfig {
                     .defineInRange("streamedChunkSize", 32768, 4096, 262144);
 
             maxStreamedBytes = builder
-                    .comment("Maximum decoded PCM bytes for a streamed sound (safety limit)")
+                    .comment("Maximum compressed OGG bytes retained in native memory per streamed sound (safety limit)")
                     .defineInRange("maxStreamedBytes", 16 * 1024 * 1024, 256 * 1024, 256 * 1024 * 1024);
 
             attenuationExponent = builder
