@@ -4,6 +4,10 @@ An instance-based spatial audio runtime for Minecraft Forge 1.20.1.
 
 GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's vanilla sound engine. It gives mods, maps, command systems, and scripted experiences direct control over persistent sound instances, world-space positioning, streamed playback, attenuation, source priority, runtime parameter changes, and server-to-client orchestration.
 
+---
+### Team maintaining this project: [GFBS Mod Series Maintainers](https://github.com/orgs/LytharaLab/teams/gfbs-mod-series-maintainers)
+### 维护此项目的团队: [GFBS Mod Series Maintainers](https://github.com/orgs/LytharaLab/teams/gfbs-mod-series-maintainers)
+
 ## Repository
 
 - [Source code](https://github.com/LytharaLab/GFBS-Auralis)
