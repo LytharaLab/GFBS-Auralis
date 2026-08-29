@@ -7,6 +7,7 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 ---
 ### Team maintaining this project: [GFBS Mod Series Maintainers](https://github.com/orgs/LytharaLab/teams/gfbs-mod-series-maintainers)
 ### 维护此项目的团队: [GFBS Mod Series Maintainers](https://github.com/orgs/LytharaLab/teams/gfbs-mod-series-maintainers)
+---
 
 ## Repository
 
