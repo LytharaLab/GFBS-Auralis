@@ -20,13 +20,19 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 
 | Component | Version |
 | --- | --- |
-| GFBS: Auralis | `2.3.0` |
+| GFBS: Auralis | `2.3.1` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.13` |
 | Java | `17` |
 | Mod ID | `gfbs_auralis` |
 
 The OpenAL engine and all audio-device operations run on the physical client. Install the mod on the server as well when using its commands, packets, synchronized state, entity binding, or block binding.
+
+## 2.3.1 buffered playback start correctness
+
+Auralis 2.3.1 guarantees that a newly started, immediately materialized non-streamed sound begins at sample zero. Scheduler delay is no longer converted into an `AL_SEC_OFFSET` seek before the first `alSourcePlay`, so short transients and leading audio frames are preserved even when asynchronous creation completes just after a client tick.
+
+The fix is scoped to the first physical scheduling opportunity. Voices that actually remain virtual because they are inaudible, below priority, over the Source budget, or temporarily unable to allocate a Source continue advancing their logical timelines and later materialize at the correct virtual playback cursor. Stop/replay generations are validated so a delayed scheduler pass cannot rebase a newer playback cycle.
 
 ## 2.3.0 custom PCM data sources
 
