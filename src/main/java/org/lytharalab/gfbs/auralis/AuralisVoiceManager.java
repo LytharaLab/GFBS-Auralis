@@ -7,6 +7,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -16,7 +17,12 @@ import java.util.Set;
  * audible enough and rank within the physical source budget are materialized.</p>
  */
 final class AuralisVoiceManager {
-    private record Candidate(AuralisSoundInstanceImpl voice, double score, boolean alreadyPhysical) {}
+    private record Candidate(
+            AuralisSoundInstanceImpl voice,
+            double score,
+            boolean alreadyPhysical,
+            long initialBufferedStartToken
+    ) {}
 
     private final OpenALSourcePool sourcePool;
     private final float materializeGainThreshold;
@@ -47,15 +53,19 @@ final class AuralisVoiceManager {
             long nowNanos
     ) {
         List<Candidate> candidates = new ArrayList<>(Math.min(voices.size(), 1024));
+        Map<AuralisSoundInstanceImpl, Long> deferredInitialStarts = new IdentityHashMap<>();
 
-        int logical = 0;
-        int playing = 0;
-
-        // Phase 1: advance every logical voice, including fully virtual voices.
+        // Phase 1: advance established logical voices. A newly-started buffered
+        // voice gets one deferred pass so an immediately available physical
+        // Source can start at sample zero instead of seeking past scheduler delay.
         for (AuralisSoundInstanceImpl voice : voices) {
             if (voice == null || voice.isDisposed()) continue;
-            logical++;
-            voice.advanceLogicalVoice(nowNanos);
+            long initialBufferedStartToken = voice.claimInitialBufferedStartForScheduling();
+            if (initialBufferedStartToken == InitialBufferedPlaybackGuard.NONE) {
+                voice.advanceLogicalVoice(nowNanos);
+            } else {
+                deferredInitialStarts.put(voice, initialBufferedStartToken);
+            }
 
             if (!voice.isPlaying()) {
                 if (voice.isPhysicalVoice()) {
@@ -63,7 +73,6 @@ final class AuralisVoiceManager {
                 }
                 continue;
             }
-            playing++;
 
             if (!voice.isBindingRequested()) {
                 if (voice.isPhysicalVoice()) {
@@ -87,7 +96,8 @@ final class AuralisVoiceManager {
             candidates.add(new Candidate(
                     voice,
                     voice.voiceScore(listenerPos, attenuationExponent),
-                    voice.isPhysicalVoice()
+                    voice.isPhysicalVoice(),
+                    initialBufferedStartToken
             ));
         }
 
@@ -115,19 +125,43 @@ final class AuralisVoiceManager {
             }
         }
 
-        // Phase 3: materialize selected virtual voices at their current logical cursor.
+        // Phase 3: materialize selected virtual voices. A first-pass buffered
+        // voice starts at zero and rebases its logical clock atomically with
+        // alSourcePlay; all later materializations retain cursor-based resume.
+        Set<AuralisSoundInstanceImpl> committedInitialStarts =
+                java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (int i = 0; i < selectedCount; i++) {
-            AuralisSoundInstanceImpl voice = candidates.get(i).voice();
+            Candidate candidate = candidates.get(i);
+            AuralisSoundInstanceImpl voice = candidate.voice();
             if (!voice.isPhysicalVoice()) {
-                voice.materializePhysicalVoice(listenerPos, attenuationExponent);
+                AuralisSoundInstanceImpl.PhysicalMaterializationResult result = voice.materializePhysicalVoice(
+                        listenerPos,
+                        attenuationExponent,
+                        candidate.initialBufferedStartToken()
+                );
+                if (result.committedInitialBufferedStart()) {
+                    committedInitialStarts.add(voice);
+                }
             }
         }
 
+        // If the first pass stayed virtual (inaudible, over budget, stopped, or
+        // failed to allocate), preserve the original virtualization contract by
+        // accounting for all elapsed logical time immediately.
+        for (AuralisSoundInstanceImpl voice : deferredInitialStarts.keySet()) {
+            if (!committedInitialStarts.contains(voice)) {
+                voice.advanceLogicalVoice(nowNanos);
+            }
+        }
+
+        int logical = 0;
+        int playing = 0;
         int physical = 0;
         for (AuralisSoundInstanceImpl voice : voices) {
-            if (voice != null && !voice.isDisposed() && voice.isPhysicalVoice()) {
-                physical++;
-            }
+            if (voice == null || voice.isDisposed()) continue;
+            logical++;
+            if (voice.isPlaying()) playing++;
+            if (voice.isPhysicalVoice()) physical++;
         }
 
         logicalVoiceCount = logical;
