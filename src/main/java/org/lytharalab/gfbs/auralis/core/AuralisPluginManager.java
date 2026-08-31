@@ -19,6 +19,9 @@ import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
 import org.lytharalab.gfbs.auralis.api.processing.AudioProcessorFactory;
 import org.lytharalab.gfbs.auralis.core.bus.AuralisBusManager;
 import org.lytharalab.gfbs.auralis.core.effect.AuralisEffectRegistryImpl;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceFactory;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceRegistry;
+import org.lytharalab.gfbs.auralis.core.source.AudioDataSourceRegistryImpl;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -53,7 +56,8 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
             IAuralisEngine engine,
             AudioBusSystem buses,
             AuralisEffectRegistry effects,
-            OpenALAccess openAL
+            OpenALAccess openAL,
+            AudioDataSourceRegistry dataSources
     ) {
     }
 
@@ -96,6 +100,7 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
     private final AudioBusSystem buses;
     private final AuralisEffectRegistry effects;
     private final OpenALAccess openAL;
+    private final AudioDataSourceRegistry dataSources;
     private final AuralisEventBusImpl eventBus = new AuralisEventBusImpl();
     private final Map<String, AuralisPlugin> plugins = new LinkedHashMap<>();
     private final Map<String, OwnedContext> contexts = new LinkedHashMap<>();
@@ -118,19 +123,32 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
     }
 
     private AuralisPluginManager(LegacyServices services) {
-        this(services.engine(), services.buses(), services.effects(), services.openAL());
+        this(services.engine(), services.buses(), services.effects(), services.openAL(), services.dataSources());
     }
 
+    /** Compatibility constructor retained for integrations compiled against 2.2. */
+    @Deprecated
     public AuralisPluginManager(
             IAuralisEngine engine,
             AudioBusSystem buses,
             AuralisEffectRegistry effects,
             OpenALAccess openAL
     ) {
+        this(engine, buses, effects, openAL, new AudioDataSourceRegistryImpl());
+    }
+
+    public AuralisPluginManager(
+            IAuralisEngine engine,
+            AudioBusSystem buses,
+            AuralisEffectRegistry effects,
+            OpenALAccess openAL,
+            AudioDataSourceRegistry dataSources
+    ) {
         this.engine = Objects.requireNonNull(engine, "engine");
         this.buses = Objects.requireNonNull(buses, "buses");
         this.effects = Objects.requireNonNull(effects, "effects");
         this.openAL = Objects.requireNonNull(openAL, "openAL");
+        this.dataSources = Objects.requireNonNull(dataSources, "dataSources");
         this.managerContext = new OwnedContext("legacy:manager");
     }
 
@@ -357,6 +375,7 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
     @Override public AudioBusSystem buses() { return buses; }
     @Override public AuralisEffectRegistry effects() { return effects; }
     @Override public OpenALAccess openAL() { return openAL; }
+    @Override public AudioDataSourceRegistry dataSources() { return dataSources; }
     @Override public String pluginId() { return "legacy:manager"; }
 
     /** Legacy singleton registrations only; factory products are per voice. */
@@ -497,7 +516,7 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
             @Override public OpenALAccess openAL() { return openAL; }
             @Override public void shutdown() { }
         };
-        return new LegacyServices(engine, buses, effects, openAL);
+        return new LegacyServices(engine, buses, effects, openAL, new AudioDataSourceRegistryImpl());
     }
 
     private void registerLegacyProcessor(AudioProcessor processor) {
@@ -526,6 +545,7 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
         private final List<AudioProcessor> processors = new ArrayList<>();
         private final Set<String> processorFactoryIds = new LinkedHashSet<>();
         private final Set<String> effectTypeIds = new LinkedHashSet<>();
+        private final Set<String> dataSourceTypeIds = new LinkedHashSet<>();
         private final List<EventRegistration<?>> events = new ArrayList<>();
         private final AuralisEventBus ownedEventBus = new OwnedEventBus();
         private boolean cleaned;
@@ -587,6 +607,21 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
         @Override public AudioBusSystem buses() { return buses; }
         @Override public AuralisEffectRegistry effects() { return effects; }
         @Override public OpenALAccess openAL() { return openAL; }
+        @Override public AudioDataSourceRegistry dataSources() { return dataSources; }
+
+        @Override
+        public synchronized void registerAudioDataSource(String typeId, AudioDataSourceFactory factory) {
+            requireActive();
+            String id = validateOwnedId(typeId);
+            dataSources.register(id, factory);
+            dataSourceTypeIds.add(id);
+        }
+
+        @Override
+        public synchronized void unregisterAudioDataSource(String typeId) {
+            String id = validateOwnedId(typeId);
+            if (dataSourceTypeIds.remove(id)) dataSources.unregister(id);
+        }
         @Override public String pluginId() { return pluginId; }
 
         private synchronized void cleanup() {
@@ -601,6 +636,8 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
             processorFactoryIds.clear();
             for (String id : effectTypeIds) effects.unregister(id);
             effectTypeIds.clear();
+            for (String id : dataSourceTypeIds) dataSources.unregister(id);
+            dataSourceTypeIds.clear();
         }
 
         private String validateOwnedId(String raw) {

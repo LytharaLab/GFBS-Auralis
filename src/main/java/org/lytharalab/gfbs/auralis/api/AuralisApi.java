@@ -28,6 +28,9 @@ import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectRegistry;
 import org.lytharalab.gfbs.auralis.api.openal.OpenALAccess;
 import org.lytharalab.gfbs.auralis.api.plugin.AuralisPlugin;
 import org.lytharalab.gfbs.auralis.api.plugin.AuralisPluginService;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSource;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceRegistry;
+import org.lytharalab.gfbs.auralis.api.source.AudioSourceRequest;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -74,6 +77,7 @@ public final class AuralisApi {
     public static AuralisEffectRegistry effects() { return engine().effects(); }
     public static AuralisPluginService plugins() { return engine().plugins(); }
     public static OpenALAccess openAL() { return engine().openAL(); }
+    public static AudioDataSourceRegistry dataSources() { return engine().dataSources(); }
 
     /**
      * Registers a plugin safely before or after client-engine initialization.
@@ -142,6 +146,21 @@ public final class AuralisApi {
             return new ServerPlaceholderSoundInstance();
         }
         return engine.createStreamed(soundEvent);
+    }
+
+    public static AuralisSoundInstance create(AudioDataSource source) {
+        java.util.Objects.requireNonNull(source, "source");
+        IAuralisEngine engine = ENGINE;
+        if (engine != null) return engine.create(source);
+        try {
+            source.close();
+        } catch (Exception ignored) {
+        }
+        return new ServerPlaceholderSoundInstance();
+    }
+
+    public static AuralisSoundInstance create(String sourceType, AudioSourceRequest request) {
+        return engine().create(sourceType, request);
     }
 
     public static CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent) {

@@ -26,6 +26,9 @@ import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
 import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectRegistry;
 import org.lytharalab.gfbs.auralis.api.openal.OpenALAccess;
 import org.lytharalab.gfbs.auralis.api.plugin.AuralisPluginService;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSource;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceRegistry;
+import org.lytharalab.gfbs.auralis.api.source.AudioSourceRequest;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -35,6 +38,22 @@ public interface IAuralisEngine {
 
     CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent);
     CompletableFuture<AuralisSoundInstance> createStreamedAsync(SoundEvent soundEvent);
+
+    /** Creates a voice from an already-open source and transfers source ownership to the engine. */
+    default AuralisSoundInstance create(AudioDataSource source) {
+        throw new UnsupportedOperationException("Custom audio data sources require Auralis 2.3.0");
+    }
+
+    /** Creates a voice through a plugin-registered source factory. */
+    default AuralisSoundInstance create(String sourceType, AudioSourceRequest request) {
+        try {
+            return create(dataSources().create(sourceType, request));
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new IllegalStateException("Failed to create custom audio data source: " + sourceType, failure);
+        }
+    }
 
     void bind(AuralisSoundInstance instance);
     void unbind(AuralisSoundInstance instance);
@@ -67,6 +86,10 @@ public interface IAuralisEngine {
 
     default OpenALAccess openAL() {
         throw new UnsupportedOperationException("OpenAL access requires Auralis 2.2.0");
+    }
+
+    default AudioDataSourceRegistry dataSources() {
+        throw new UnsupportedOperationException("Audio data source registry requires Auralis 2.3.0");
     }
 
     void shutdown();

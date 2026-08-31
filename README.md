@@ -20,13 +20,21 @@ GFBS: Auralis runs an independent OpenAL playback layer alongside Minecraft's va
 
 | Component | Version |
 | --- | --- |
-| GFBS: Auralis | `2.2.0` |
+| GFBS: Auralis | `2.3.0` |
 | Minecraft | `1.20.1` |
 | Minecraft Forge | `47.4.13` |
 | Java | `17` |
 | Mod ID | `gfbs_auralis` |
 
 The OpenAL engine and all audio-device operations run on the physical client. Install the mod on the server as well when using its commands, packets, synchronized state, entity binding, or block binding.
+
+## 2.3.0 custom PCM data sources
+
+Auralis 2.3.0 makes streaming input a first-class plugin extension. Plugins can register namespaced source factories, produce PCM dynamically, expose seekable timeline media, or feed live network/generated PCM through a bounded non-blocking push source. Temporary live underflow is distinct from end-of-stream, so playback resumes when new data arrives instead of terminating the voice.
+
+The built-in OGG stream now travels through the same source contract as third-party sources. Source reads, seeks, and cleanup are serialized on the OpenAL owner thread; plugin unload automatically unregisters owned factories while already-created voices retain and close their source instances safely.
+
+See [Custom audio data sources](docs/CUSTOM_AUDIO_DATA_SOURCES_2.3.md) for contracts, lifecycle details, and examples.
 
 ## 2.2.0 buses, effects, and plugins
 

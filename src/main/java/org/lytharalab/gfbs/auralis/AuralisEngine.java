@@ -32,6 +32,9 @@ import org.lytharalab.gfbs.auralis.core.bus.BusMixSnapshot;
 import org.lytharalab.gfbs.auralis.core.effect.AuralisEffectRegistryImpl;
 import org.lytharalab.gfbs.auralis.core.effect.OpenALEffectRack;
 import org.lytharalab.gfbs.auralis.core.openal.OpenALAccessImpl;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSource;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceRegistry;
+import org.lytharalab.gfbs.auralis.core.source.AudioDataSourceRegistryImpl;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -56,6 +59,7 @@ public final class AuralisEngine implements IAuralisEngine {
     private final AuralisEffectRegistryImpl effectRegistry;
     private final OpenALAccessImpl openALAccess;
     private final OpenALEffectRack effectRack;
+    private final AudioDataSourceRegistryImpl dataSourceRegistry;
     private final AuralisVoiceManager voiceManager;
     private final float attenuationExponent;
     private final float volumeSmoothing;
@@ -115,7 +119,8 @@ public final class AuralisEngine implements IAuralisEngine {
         AuralisEffects.registerBuiltIns(effectRegistry);
         this.openALAccess = new OpenALAccessImpl(al);
         this.effectRack = new OpenALEffectRack(openALAccess);
-        this.pluginManager = new AuralisPluginManager(this, busManager, effectRegistry, openALAccess);
+        this.dataSourceRegistry = new AudioDataSourceRegistryImpl();
+        this.pluginManager = new AuralisPluginManager(this, busManager, effectRegistry, openALAccess, dataSourceRegistry);
         this.voiceManager = new AuralisVoiceManager(sourcePool, voiceMaterializeGain, voiceVirtualizeGain);
         this.streamedChunkSize = streamedChunkSize;
         this.attenuationExponent = attenuationExponent;
@@ -130,6 +135,7 @@ public final class AuralisEngine implements IAuralisEngine {
     @Override public AuralisEffectRegistry effects() { return effectRegistry; }
     @Override public AuralisPluginService plugins() { return pluginManager; }
     @Override public OpenALAccess openAL() { return openALAccess; }
+    @Override public AudioDataSourceRegistry dataSources() { return dataSourceRegistry; }
 
     /** Number of retained logical instances, including stopped reusable instances. */
     @Override
@@ -162,6 +168,33 @@ public final class AuralisEngine implements IAuralisEngine {
 
     public AuralisSoundInstance createStreamed(SoundEvent soundEvent) {
         return create(soundEvent, true);
+    }
+
+    @Override
+    public AuralisSoundInstance create(AudioDataSource source) {
+        Objects.requireNonNull(source, "source");
+        AuralisSoundInstanceImpl inst = null;
+        boolean ownershipTransferred = false;
+        try {
+            ensureAcceptingCreations();
+            inst = new AuralisSoundInstanceImpl(
+                    al, source, streamedChunkSize, bufferCache, sourcePool, busManager, effectRack
+            );
+            ownershipTransferred = true;
+            synchronized (lifecycleLock) {
+                ensureAcceptingCreations();
+                inst.replaceGlobalProcessors(pluginManager.createGlobalProcessors(), pluginManager.getProcessorRevision());
+                instances.put(inst, inst);
+            }
+            return inst;
+        } catch (Throwable failure) {
+            cleanupFailedCreation(inst, failure);
+            if (!ownershipTransferred) {
+                try { source.close(); } catch (Throwable closeFailure) { failure.addSuppressed(closeFailure); }
+            }
+            if (!shuttingDown.get()) GFBsAuralis.LOGGER.error("Failed to create custom audio source instance", failure);
+            return createFallbackInstance();
+        }
     }
 
     public CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent) {

@@ -8,6 +8,8 @@ import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectRegistry;
 import org.lytharalab.gfbs.auralis.api.openal.OpenALAccess;
 import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
 import org.lytharalab.gfbs.auralis.api.processing.AudioProcessorFactory;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceFactory;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceRegistry;
 
 /**
  * 插件上下文
@@ -74,6 +76,18 @@ public interface PluginContext {
 
     default OpenALAccess openAL() {
         throw new UnsupportedOperationException("OpenAL access requires Auralis 2.2.0");
+    }
+
+    default AudioDataSourceRegistry dataSources() {
+        throw new UnsupportedOperationException("Audio data sources require Auralis 2.3.0");
+    }
+
+    default void registerAudioDataSource(String typeId, AudioDataSourceFactory factory) {
+        dataSources().register(typeId, factory);
+    }
+
+    default void unregisterAudioDataSource(String typeId) {
+        dataSources().unregister(typeId);
     }
 
     default String pluginId() {

@@ -60,6 +60,8 @@ Inspect runtime state through `AuralisApi.plugins().states()` or `find(id)`. Use
 | `buses()` | Create, route, inspect, and modify hierarchical buses |
 | `effects()` | Create registered effects or inspect effect factories |
 | `openAL()` | Controlled work on the active OpenAL context |
+| `dataSources()` | Inspect/create registered 2.3 custom PCM source types |
+| `registerAudioDataSource(...)` | Register an owned PCM source factory with unload cleanup |
 | `getEventBus()` | Owned event listener registration and plugin events |
 | `registerEffectType(...)` | Register a custom effect factory with automatic unload cleanup |
 | `registerGlobalProcessorFactory(...)` | Create a dedicated processor for every logical voice |
@@ -140,3 +142,5 @@ Use `isEfxSupported()` and `getMaxAuxiliarySends()` before allocating EFX resour
 - Keep `getRevision()` stable until rendering parameters actually change.
 - Keep source-effect `apply` idempotent; it runs on materialization and after route/effect revision changes, not as a general per-frame callback.
 - Treat callbacks as real-time work. Auralis isolates exceptions and invalid output, but cannot make an arbitrarily slow third-party DSP implementation real-time safe.
+
+For dynamically generated, network-fed, or custom-decoded PCM, see [Custom audio data sources 2.3](CUSTOM_AUDIO_DATA_SOURCES_2.3.md).
