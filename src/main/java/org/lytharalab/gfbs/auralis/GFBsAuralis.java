@@ -35,7 +35,7 @@ public class GFBsAuralis {
         ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, GFBsAuralisConfig.CLIENT_SPEC);
 
         MinecraftForge.EVENT_BUS.register(this);
-        LOGGER.info("GFBS-Auralis Startup...");
+        LOGGER.info("GFBS-Auralis startup!");
     }
 
     private void commonSetup(final FMLCommonSetupEvent event) {
