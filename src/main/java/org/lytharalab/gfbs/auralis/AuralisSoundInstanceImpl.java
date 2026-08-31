@@ -16,6 +16,11 @@ import org.lytharalab.gfbs.auralis.core.bus.AuralisBusManager;
 import org.lytharalab.gfbs.auralis.core.bus.CompiledBusRoute;
 import org.lytharalab.gfbs.auralis.core.effect.OpenALEffectRack;
 import org.lytharalab.gfbs.auralis.utils.OggVorbisDecoder;
+import org.lytharalab.gfbs.auralis.api.source.AudioDataSource;
+import org.lytharalab.gfbs.auralis.api.source.AudioReadResult;
+import org.lytharalab.gfbs.auralis.api.source.AudioSourceMode;
+import org.lytharalab.gfbs.auralis.api.source.PcmFormat;
+import org.lytharalab.gfbs.auralis.core.source.OggVorbisAudioDataSource;
 
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
@@ -52,9 +57,12 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     // Streaming state. The decoder exists for the logical instance; OpenAL
     // streaming buffers are created lazily only after the voice becomes physical.
-    private final @Nullable OggVorbisDecoder.StreamDecoder streamDecoder;
+    private final @Nullable AudioDataSource dataSource;
+    private final @Nullable PcmFormat streamFormat;
     private volatile @Nullable int[] streamingBuffers;
     private final @Nullable ByteBuffer decodeBuffer;
+    private final java.util.ArrayDeque<Integer> idleStreamingBuffers = new java.util.ArrayDeque<>();
+    private volatile AudioReadResult lastStreamRead = AudioReadResult.DATA;
     private final double durationSeconds;
 
     private final SoundBufferCache bufferCache;
@@ -133,7 +141,8 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     ) {
         this.al = Objects.requireNonNull(al, "al");
         this.alBuffer = alBuffer;
-        this.streamDecoder = null;
+        this.dataSource = null;
+        this.streamFormat = null;
         this.streamingBuffers = null;
         this.decodeBuffer = null;
         this.bufferCache = Objects.requireNonNull(bufferCache, "bufferCache");
@@ -157,9 +166,26 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             AuralisBusManager busManager,
             OpenALEffectRack effectRack
     ) {
+        this(al, new OggVorbisAudioDataSource(streamDecoder), chunkSize, bufferCache, sourcePool, busManager, effectRack);
+    }
+
+    AuralisSoundInstanceImpl(
+            AuralisAL al,
+            AudioDataSource dataSource,
+            int chunkSize,
+            SoundBufferCache bufferCache,
+            OpenALSourcePool sourcePool,
+            AuralisBusManager busManager,
+            OpenALEffectRack effectRack
+    ) {
         this.al = Objects.requireNonNull(al, "al");
         this.alBuffer = -1;
-        this.streamDecoder = Objects.requireNonNull(streamDecoder, "streamDecoder");
+        this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.streamFormat = Objects.requireNonNull(dataSource.format(), "dataSource.format");
+        AudioSourceMode sourceMode = Objects.requireNonNull(dataSource.mode(), "dataSource.mode");
+        if (sourceMode == AudioSourceMode.TIMELINE && !dataSource.isSeekable()) {
+            throw new IllegalArgumentException("TIMELINE audio data sources must be seekable");
+        }
         this.streamingBuffers = null;
         this.decodeBuffer = MemoryUtil.memAlloc(chunkSize);
         this.bufferCache = Objects.requireNonNull(bufferCache, "bufferCache");
@@ -169,7 +195,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         this.isStreamed = true;
         this.staticPlaybackBuffer = -1;
         this.pendingStaticBuffer = 0;
-        double reportedDuration = streamDecoder.getDurationSeconds();
+        double reportedDuration = dataSource.durationSeconds();
         this.durationSeconds = Double.isFinite(reportedDuration) && reportedDuration > 0.0
                 ? reportedDuration
                 : 0.0;
@@ -196,7 +222,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     public void play() {
         if (disposed.get() || resourcesFreed.get()) return;
         if (!isStreamed && alBuffer == -1) return;
-        if (isStreamed && streamDecoder == null) return;
+        if (isStreamed && dataSource == null) return;
 
         long now = System.nanoTime();
         boolean shouldRestartPhysical;
@@ -682,7 +708,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     boolean hasPlayableResource() {
-        return isStreamed ? streamDecoder != null : alBuffer != -1;
+        return isStreamed ? dataSource != null : alBuffer != -1;
     }
 
     boolean isLogicallyActive() {
@@ -812,9 +838,9 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
                     if (isStreamed) {
                         AL10.alSourcei(sourceId, AL10.AL_LOOPING, AL10.AL_FALSE);
-                        if (streamDecoder != null) {
+                        if (dataSource != null) {
                             resetProcessorsOnALThread();
-                            streamDecoder.seekSeconds(cursor);
+                            seekStreamForMaterialization(cursor);
                             queueInitialBuffers(sourceId);
                         }
                     } else {
@@ -871,6 +897,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             if (isStreamed) {
                 int[] buffers = streamingBuffers;
                 streamingBuffers = null;
+                idleStreamingBuffers.clear();
                 if (buffers != null) {
                     bufferCache.deleteBuffers(buffers);
                 }
@@ -893,9 +920,9 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 applyNonGainParams(sourceId);
                 effectRack.applyToSourceOnALThread(sourceId, busRoute);
                 // Keep the current safe gain; the next attenuation pass updates it.
-                if (streamDecoder != null) {
+                if (dataSource != null) {
                     resetProcessorsOnALThread();
-                    streamDecoder.seekSeconds(cursor);
+                    seekStreamForMaterialization(cursor);
                     queueInitialBuffers(sourceId);
                 }
             } else {
@@ -916,8 +943,8 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 if (looping) {
                     cursor %= durationSeconds;
                 } else {
-                    double lastSampleGuard = isStreamed && streamDecoder != null
-                            ? (1.0 / Math.max(1, streamDecoder.getSampleRate()))
+                    double lastSampleGuard = isStreamed && streamFormat != null
+                            ? (1.0 / Math.max(1, streamFormat.sampleRate()))
                             : 0.000_001;
                     cursor = Math.min(cursor, Math.max(0.0, durationSeconds - lastSampleGuard));
                 }
@@ -929,6 +956,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private void ensureStreamingBuffers() {
         if (!isStreamed || streamingBuffers != null) return;
         streamingBuffers = bufferCache.createStreamingBuffers(STREAM_BUFFER_COUNT);
+        idleStreamingBuffers.clear();
     }
 
     void updatePhysicalOnALThread(Vec3 listenerPos, float attenuationExponent, float volumeSmoothing) {
@@ -946,7 +974,9 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         }
 
         // Fallback for unusual files/drivers where duration could not be determined.
-        if (!looping && durationSeconds <= 0.0 && startedPlayback.get() && !paused.get()) {
+        boolean sourceCanLoop = dataSource != null && dataSource.isSeekable();
+        if ((!looping || !sourceCanLoop) && durationSeconds <= 0.0 && startedPlayback.get() && !paused.get()
+                && lastStreamRead == AudioReadResult.END) {
             int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
             if (state == AL10.AL_STOPPED) {
                 pendingCompletionWasPhysical.set(true);
@@ -1141,7 +1171,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     private void updateStreamedBuffersOnALThread(int sourceId) {
-        if (!isStreamed || streamDecoder == null) return;
+        if (!isStreamed || dataSource == null) return;
 
         int processed = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED);
         if (processed > 0) {
@@ -1149,10 +1179,20 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 IntBuffer tmp = stack.mallocInt(processed);
                 AL10.alSourceUnqueueBuffers(sourceId, tmp);
                 for (int i = 0; i < processed; i++) {
-                    refillAndQueue(sourceId, tmp.get(i));
+                    int bufferId = tmp.get(i);
+                    if (!refillAndQueue(sourceId, bufferId)) idleStreamingBuffers.addLast(bufferId);
                 }
             } catch (Throwable ignored) {
             }
+        }
+
+        // A live producer may return WAIT for any number of ticks. Retain every
+        // unqueued AL buffer and retry it instead of permanently shrinking the queue.
+        int retries = idleStreamingBuffers.size();
+        for (int i = 0; i < retries; i++) {
+            int bufferId = idleStreamingBuffers.removeFirst();
+            if (!refillAndQueue(sourceId, bufferId)) idleStreamingBuffers.addLast(bufferId);
+            if (lastStreamRead != AudioReadResult.DATA) break;
         }
 
         if (!paused.get() && startedPlayback.get()) {
@@ -1169,29 +1209,49 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private void queueInitialBuffers(int sourceId) {
         int[] buffers = streamingBuffers;
         if (buffers == null) return;
-        for (int bufferId : buffers) {
-            if (!refillAndQueue(sourceId, bufferId)) break;
+        for (int index = 0; index < buffers.length; index++) {
+            int bufferId = buffers[index];
+            if (!refillAndQueue(sourceId, bufferId)) {
+                for (int remaining = index; remaining < buffers.length; remaining++) {
+                    idleStreamingBuffers.addLast(buffers[remaining]);
+                }
+                break;
+            }
         }
     }
 
     private boolean refillAndQueue(int sourceId, int bufferId) {
-        if (streamDecoder == null || decodeBuffer == null) return false;
+        if (dataSource == null || streamFormat == null || decodeBuffer == null) return false;
 
         decodeBuffer.clear();
-        int bytes = streamDecoder.decodeChunk(decodeBuffer);
-        if (bytes <= 0 && looping) {
-            streamDecoder.seekStart();
-            decodeBuffer.clear();
-            bytes = streamDecoder.decodeChunk(decodeBuffer);
+        int start = decodeBuffer.position();
+        AudioReadResult result;
+        try {
+            result = Objects.requireNonNull(dataSource.read(decodeBuffer), "Audio data source returned null result");
+            int bytes = decodeBuffer.position() - start;
+            validateSourceRead(result, bytes);
+            if (result == AudioReadResult.END && looping && dataSource.isSeekable()) {
+                dataSource.seekSeconds(0.0);
+                decodeBuffer.clear();
+                start = decodeBuffer.position();
+                result = Objects.requireNonNull(dataSource.read(decodeBuffer), "Audio data source returned null result");
+                bytes = decodeBuffer.position() - start;
+                validateSourceRead(result, bytes);
+            }
+        } catch (Throwable failure) {
+            lastStreamRead = AudioReadResult.END;
+            GFBsAuralis.LOGGER.error("Custom audio data source read failed; terminating the voice", failure);
+            return false;
         }
 
-        if (bytes <= 0) return false;
+        lastStreamRead = result;
+        if (result != AudioReadResult.DATA) return false;
         decodeBuffer.flip();
 
         List<AudioProcessor> processors = activeProcessors;
         if (!processors.isEmpty()) {
-            int channels = streamDecoder.getChannels();
-            int rate = streamDecoder.getSampleRate();
+            int channels = streamFormat.channels();
+            int rate = streamFormat.sampleRate();
             int currentBytes = decodeBuffer.limit();
 
             for (AudioProcessor processor : processors) {
@@ -1231,9 +1291,38 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             if (currentBytes == 0) return false;
         }
 
-        AL10.alBufferData(bufferId, streamDecoder.getAlFormat(), decodeBuffer, streamDecoder.getSampleRate());
+        int alFormat = streamFormat.channels() == 1 ? AL10.AL_FORMAT_MONO16 : AL10.AL_FORMAT_STEREO16;
+        AL10.alBufferData(bufferId, alFormat, decodeBuffer, streamFormat.sampleRate());
         AL10.alSourceQueueBuffers(sourceId, bufferId);
         return true;
+    }
+
+    private void validateSourceRead(AudioReadResult result, int bytes) {
+        if (decodeBuffer == null || streamFormat == null) return;
+        if (bytes < 0 || bytes > decodeBuffer.capacity()) {
+            throw new IllegalStateException("Audio data source wrote outside the destination buffer");
+        }
+        if (result == AudioReadResult.DATA && bytes == 0) {
+            throw new IllegalStateException("Audio data source returned DATA without PCM bytes");
+        }
+        if (result != AudioReadResult.DATA && bytes != 0) {
+            throw new IllegalStateException("Audio data source wrote PCM while returning " + result);
+        }
+        if ((bytes % streamFormat.frameSizeBytes()) != 0) {
+            throw new IllegalStateException("Audio data source returned a partial PCM frame: " + bytes + " bytes");
+        }
+    }
+
+    private void seekStreamForMaterialization(double cursor) {
+        if (dataSource == null) return;
+        if (dataSource.mode() == AudioSourceMode.TIMELINE) {
+            try {
+                dataSource.seekSeconds(cursor);
+            } catch (Exception failure) {
+                throw new IllegalStateException("Unable to seek audio data source", failure);
+            }
+        }
+        lastStreamRead = AudioReadResult.DATA;
     }
 
     boolean finalizeNaturalCompletionIfNeeded() {
@@ -1350,7 +1439,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private void freeStreamResourcesOnALThread(@Nullable int[] buffers) {
         Throwable failure = null;
         try {
-            if (streamDecoder != null) streamDecoder.close();
+            if (dataSource != null) dataSource.close();
         } catch (Throwable t) {
             failure = t;
         }
