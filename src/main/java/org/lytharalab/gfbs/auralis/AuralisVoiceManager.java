@@ -74,7 +74,7 @@ final class AuralisVoiceManager {
                 continue;
             }
 
-            if (!voice.isBindingRequested()) {
+            if (!voice.isMaterializationRequested()) {
                 if (voice.isPhysicalVoice()) {
                     voice.virtualizePhysicalVoice();
                 }

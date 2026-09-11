@@ -17,6 +17,7 @@ import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import org.lytharalab.gfbs.auralis.api.AuralisApi;
+import org.lytharalab.gfbs.auralis.api.AuralisClientApi;
 import org.slf4j.Logger;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -121,22 +122,18 @@ public class GFBsAuralis {
             if (e.phase != TickEvent.Phase.END) return;
             if (ENGINE_RUNTIME_FAILED.get()) return;
             try {
-                ClientSoundController.flushPendingIfReady();
-                var mc = Minecraft.getInstance();
-                if (mc.level != null) {
-                    ClientSoundController.tickBoundPositions(mc.level, mc.level.entitiesForRendering());
-                }
+                ClientAuthorityController.tick();
                 if (AuralisApi.isInitialized()) {
                     AuralisApi.engine().tick();
                 }
-                ClientSoundController.pruneFinishedInstances();
             } catch (Throwable runtimeFailure) {
                 if (runtimeFailure instanceof VirtualMachineError fatal) throw fatal;
                 if (runtimeFailure instanceof ThreadDeath fatal) throw fatal;
                 if (ENGINE_RUNTIME_FAILED.compareAndSet(false, true)) {
                     LOGGER.error("GFBS-Auralis runtime failure; disabling the client audio engine instead of crashing the game", runtimeFailure);
                     try {
-                        ClientSoundController.stopAll();
+                        ClientAuthorityController.reset();
+                        AuralisClientApi.reset();
                     } catch (Throwable shutdownFailure) {
                         runtimeFailure.addSuppressed(shutdownFailure);
                     }
@@ -156,7 +153,8 @@ public class GFBsAuralis {
         @SubscribeEvent
         public static void onClientShutdown(GameShuttingDownEvent e){
             try {
-                ClientSoundController.stopAll();
+                ClientAuthorityController.reset();
+                AuralisClientApi.reset();
                 if (AuralisApi.isInitialized()) {
                     var eng = AuralisApi.engine();
                     eng.shutdown();
@@ -174,7 +172,8 @@ public class GFBsAuralis {
 
         @SubscribeEvent
         public static void onClientLoggedOut(ClientPlayerNetworkEvent.LoggingOut e) {
-            ClientSoundController.stopAll();
+            ClientAuthorityController.reset();
+            AuralisClientApi.reset();
         }
     }
 }

@@ -43,14 +43,16 @@ Unqualified IDs inherit the plugin namespace, so the example registers `example:
 Create and configure the voice through the public engine API:
 
 ```java
-AuralisSoundInstance radio = AuralisApi.create(
+AuralisApi.create(
         "example:pcm_stream",
         new AudioSourceRequest("wss://audio.example.invalid/live", Map.of("station", "ops"))
-);
-radio.setStatic(true).setBus("Radio").play();
+).future().thenCompose(radio -> {
+    radio.setStatic(true).setBus("Radio");
+    return radio.play().future();
+});
 ```
 
-Advanced integrations may construct an `AudioDataSource` directly and transfer ownership with `AuralisApi.create(source)`.
+Advanced integrations may construct an `AudioDataSource` directly and transfer ownership with `AuralisApi.create(source)`. In 2.4 every creation path returns an `AuralisOperation` and reports failure explicitly.
 
 ## Dynamic push PCM
 

@@ -9,6 +9,13 @@ import org.lwjgl.system.MemoryUtil;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundEvent;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundListener;
+import org.lytharalab.gfbs.auralis.api.AuralisOperation;
+import org.lytharalab.gfbs.auralis.api.AuralisPlaybackState;
+import org.lytharalab.gfbs.auralis.api.AuralisSoundSnapshot;
+import org.lytharalab.gfbs.auralis.api.TimelineCalibrationMath;
+import org.lytharalab.gfbs.auralis.api.TimelineCalibrationPolicy;
+import org.lytharalab.gfbs.auralis.api.TimelineCalibrationResult;
+import org.lytharalab.gfbs.auralis.api.PhysicalCursorMath;
 import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
 import org.lytharalab.gfbs.auralis.api.effect.PcmEffect;
 import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
@@ -28,6 +35,8 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -62,6 +71,8 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private volatile @Nullable int[] streamingBuffers;
     private final @Nullable ByteBuffer decodeBuffer;
     private final java.util.ArrayDeque<Integer> idleStreamingBuffers = new java.util.ArrayDeque<>();
+    private final Map<Integer, Double> streamingBufferDurations = new HashMap<>();
+    private double streamingPhysicalBaseSeconds;
     private volatile AudioReadResult lastStreamRead = AudioReadResult.DATA;
     private final double durationSeconds;
 
@@ -74,6 +85,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private volatile float smoothedVolume = 1.0f;
     private volatile float pitch = 1.0f;
     private volatile float speed = 1.0f;
+    private volatile double calibrationRateMultiplier = 1.0;
 
     private volatile boolean isStatic = false;
     private volatile boolean looping = false;
@@ -93,12 +105,13 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     private final AtomicBoolean paused = new AtomicBoolean(false);
     private final AtomicBoolean startedPlayback = new AtomicBoolean(false);
-    private final AtomicBoolean bindingRequested = new AtomicBoolean(false);
+    private final AtomicBoolean materializationRequested = new AtomicBoolean(false);
     private final AtomicBoolean pendingNaturalCompletion = new AtomicBoolean(false);
     private final AtomicBoolean pendingCompletionWasPhysical = new AtomicBoolean(false);
     private final AtomicBoolean pendingEngineRemoval = new AtomicBoolean(false);
     private final AtomicBoolean resourcesFreed = new AtomicBoolean(false);
     private final AtomicBoolean disposed = new AtomicBoolean(false);
+    private final AtomicLong localRevision = new AtomicLong();
     private final InitialBufferedPlaybackGuard initialBufferedPlayback = new InitialBufferedPlaybackGuard();
 
     private final Set<AuralisSoundListener> listeners = new CopyOnWriteArraySet<>();
@@ -130,6 +143,17 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private final Object playbackClockLock = new Object();
     private volatile double logicalPlaybackSeconds = 0.0;
     private volatile long logicalClockNanos = System.nanoTime();
+
+    // Sampled only by the OpenAL owner thread and consumed by the client tick.
+    private volatile double physicalSampleSeconds = Double.NaN;
+    private volatile long physicalSampleNanos;
+    private volatile int physicalSampleSourceId = -1;
+    private volatile int physicalSampleState = AL10.AL_INITIAL;
+
+    // Hard repairs are coalesced so an OpenAL stall resumes at the newest target.
+    private final Object calibrationSeekLock = new Object();
+    private boolean calibrationWorkerQueued;
+    private double latestCalibrationSeekSeconds = Double.NaN;
 
     // Static-buffer constructor.
     AuralisSoundInstanceImpl(
@@ -204,30 +228,19 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     @Override
-    public boolean isBound() {
+    public boolean isMaterialized() {
         return source != null;
     }
 
-    /**
-     * Request participation in physical playback. In 2.1 this no longer means
-     * "allocate a Source right now"; the voice manager decides whether the
-     * logical voice should currently be physical or virtual.
-     */
-    void bind() {
-        if (disposed.get() || resourcesFreed.get()) return;
-        if (!isStreamed && alBuffer == -1) return;
-        bindingRequested.set(true);
-    }
-
     @Override
-    public void play() {
-        if (disposed.get() || resourcesFreed.get()) return;
-        if (!isStreamed && alBuffer == -1) return;
-        if (isStreamed && dataSource == null) return;
+    public AuralisOperation<AuralisSoundSnapshot> play() {
+        if (disposed.get() || resourcesFreed.get()) return rejectedOperation(AuralisOperation.Kind.PLAY, "Sound is disposed");
+        if (!isStreamed && alBuffer == -1) return rejectedOperation(AuralisOperation.Kind.PLAY, "Sound has no playable buffer");
+        if (isStreamed && dataSource == null) return rejectedOperation(AuralisOperation.Kind.PLAY, "Sound has no data source");
 
-        // Publish automatic binding before the logical start becomes visible to
-        // the scheduler. This closes the play-without-bind race for async callers.
-        bindingRequested.set(true);
+        // Publish automatic materialization before the logical start becomes visible to
+        // the scheduler. This closes the play/materialization race for async callers.
+        materializationRequested.set(true);
 
         long now = System.nanoTime();
         boolean shouldRestartPhysical;
@@ -254,19 +267,22 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         OpenALSourcePool.SourceHandle handle = source;
         if (shouldRestartPhysical && handle != null) {
-            restartPhysicalPlaybackFromLogicalCursor(handle);
+            queueCalibrationSeek(normalizedCursorForPlayback());
         }
 
         fireEvent(AuralisSoundEvent.PLAY);
+        localRevision.incrementAndGet();
+        return committedOperation(AuralisOperation.Kind.PLAY);
     }
 
     @Override
-    public void pause() {
-        if (disposed.get() || resourcesFreed.get()) return;
-        if (!startedPlayback.get() || paused.get()) return;
+    public AuralisOperation<AuralisSoundSnapshot> pause() {
+        if (disposed.get() || resourcesFreed.get()) return rejectedOperation(AuralisOperation.Kind.PAUSE, "Sound is disposed");
+        if (!startedPlayback.get() || paused.get()) return AuralisOperation.completed(AuralisOperation.Kind.PAUSE, snapshot());
 
         syncLogicalClock(System.nanoTime());
         paused.set(true);
+        calibrationRateMultiplier = 1.0;
 
         OpenALSourcePool.SourceHandle handle = source;
         if (handle != null) {
@@ -279,11 +295,13 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         }
 
         fireEvent(AuralisSoundEvent.PAUSE);
+        localRevision.incrementAndGet();
+        return committedOperation(AuralisOperation.Kind.PAUSE);
     }
 
     @Override
-    public void stop() {
-        if (disposed.get() || resourcesFreed.get()) return;
+    public AuralisOperation<AuralisSoundSnapshot> stop() {
+        if (disposed.get() || resourcesFreed.get()) return rejectedOperation(AuralisOperation.Kind.STOP, "Sound is disposed");
 
         syncLogicalClock(System.nanoTime());
         synchronized (playbackClockLock) {
@@ -294,20 +312,54 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             pendingNaturalCompletion.set(false);
             initialBufferedPlayback.invalidate();
         }
+        calibrationRateMultiplier = 1.0;
 
-        // A stopped logical voice never needs a scarce physical source. Keep
-        // STOP -> UNBIND event ordering compatible with natural completion.
+        // A stopped logical voice never needs a scarce physical source.
         boolean hadPhysicalSource = source != null;
         releasePhysicalVoice(false);
         // Do not queue a decoder seek here. The logical cursor is already reset,
         // and the next materialization seeks to it before playback. The old queued
-        // seek could run after unbind() closed the native STB handle, causing the
+        // seek could run after disposal closed the native STB handle, causing the
         // fatal stb_vorbis_seek_start use-after-free captured in the JVM crash log.
 
         fireEvent(AuralisSoundEvent.STOP);
         if (hadPhysicalSource) {
-            fireEvent(AuralisSoundEvent.UNBIND);
+            fireEvent(AuralisSoundEvent.VIRTUALIZED);
         }
+        localRevision.incrementAndGet();
+        return committedOperation(AuralisOperation.Kind.STOP);
+    }
+
+    @Override
+    public AuralisOperation<AuralisSoundSnapshot> seek(double positionSeconds) {
+        if (disposed.get() || resourcesFreed.get()) return rejectedOperation(AuralisOperation.Kind.SEEK, "Sound is disposed");
+        if (!Double.isFinite(positionSeconds) || positionSeconds < 0.0) {
+            return rejectedOperation(AuralisOperation.Kind.SEEK, "Invalid playback position");
+        }
+        setLogicalCursor(positionSeconds);
+        OpenALSourcePool.SourceHandle handle = source;
+        if (handle != null) queueCalibrationSeek(positionSeconds);
+        localRevision.incrementAndGet();
+        return committedOperation(AuralisOperation.Kind.SEEK);
+    }
+
+    @Override
+    public AuralisOperation<AuralisSoundSnapshot> dispose() {
+        if (disposed.get()) return AuralisOperation.completed(AuralisOperation.Kind.DISPOSE, snapshot());
+        disposeExplicitly();
+        return committedOperation(AuralisOperation.Kind.DISPOSE);
+    }
+
+    @Override
+    public AuralisSoundSnapshot snapshot() {
+        double cursor = observedPlaybackPositionSeconds();
+        AuralisPlaybackState state = disposed.get() ? AuralisPlaybackState.DISPOSED
+                : isPaused() ? AuralisPlaybackState.PAUSED
+                : isPlaying() ? AuralisPlaybackState.PLAYING
+                : localRevision.get() == 0L ? AuralisPlaybackState.CREATED
+                : AuralisPlaybackState.STOPPED;
+        return new AuralisSoundSnapshot(localRevision.get(), state, cursor, durationSeconds, source != null,
+                volume, pitch, speed, isStatic, position, looping, priority, minDistance, maxDistance, busName);
     }
 
     @Override
@@ -323,13 +375,86 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     @Override
     public double getPlaybackPositionSeconds() {
-        syncLogicalClock(System.nanoTime());
-        return logicalPlaybackSeconds;
+        return observedPlaybackPositionSeconds();
     }
 
     @Override
     public double getDurationSeconds() {
         return durationSeconds;
+    }
+
+    private void setLogicalCursor(double requested) {
+        calibrationRateMultiplier = 1.0;
+        double cursor = Math.max(0.0, requested);
+        if (durationSeconds > 0.0) {
+            cursor = looping ? cursor % durationSeconds : Math.min(cursor, durationSeconds);
+        }
+        synchronized (playbackClockLock) {
+            logicalPlaybackSeconds = cursor;
+            logicalClockNanos = System.nanoTime();
+            pendingNaturalCompletion.set(false);
+        }
+    }
+
+    private double observedPlaybackPositionSeconds() {
+        syncLogicalClock(System.nanoTime());
+        OpenALSourcePool.SourceHandle handle = source;
+        long sampledAt = physicalSampleNanos;
+        if (handle == null || handle.sourceId() != physicalSampleSourceId || !Double.isFinite(physicalSampleSeconds)) {
+            return logicalPlaybackSeconds;
+        }
+        double observed = physicalSampleSeconds;
+        long age = Math.max(0L, System.nanoTime() - sampledAt);
+        // Extrapolate only a fresh device sample. A stale sample is intentional:
+        // it exposes an OpenAL/disk-I/O stall to the authoritative calibrator.
+        observed = PhysicalCursorMath.project(observed, age, physicalSampleState == AL10.AL_PLAYING,
+                isPlaying(), pitch * speed * calibrationRateMultiplier, 250_000_000L);
+        if (durationSeconds > 0.0) observed = looping ? observed % durationSeconds : Math.min(observed, durationSeconds);
+        return Math.max(0.0, observed);
+    }
+
+    TimelineCalibrationResult calibrateAuthoritative(double expectedSeconds, TimelineCalibrationPolicy policy) {
+        double actual = observedPlaybackPositionSeconds();
+        TimelineCalibrationResult result = looping
+                ? TimelineCalibrationMath.decideLooping(expectedSeconds, actual, durationSeconds, policy)
+                : TimelineCalibrationMath.decide(expectedSeconds, actual, policy);
+        if (source != null && isPlaying() && physicalSampleState == AL10.AL_STOPPED
+                && (looping || durationSeconds <= 0.0 || expectedSeconds < durationSeconds)) {
+            result = new TimelineCalibrationResult(TimelineCalibrationResult.Action.HARD_SEEK,
+                    expectedSeconds - actual, 1.0);
+        }
+        switch (result.action()) {
+            case SETTLED -> {
+                calibrationRateMultiplier = 1.0;
+                pushNonGainParamsIfBound();
+            }
+            case SMOOTH -> {
+                calibrationRateMultiplier = result.rateMultiplier();
+                pushNonGainParamsIfBound();
+            }
+            case HARD_SEEK -> {
+                calibrationRateMultiplier = 1.0;
+                setLogicalCursor(expectedSeconds);
+                queueCalibrationSeek(expectedSeconds);
+            }
+        }
+        return result;
+    }
+
+    CompletableFuture<Void> awaitAudioCommit() {
+        try {
+            return al.submit(() -> null);
+        } catch (Throwable failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    private AuralisOperation<AuralisSoundSnapshot> committedOperation(AuralisOperation.Kind kind) {
+        return AuralisOperation.from(kind, awaitAudioCommit().thenApply(ignored -> snapshot()));
+    }
+
+    private AuralisOperation<AuralisSoundSnapshot> rejectedOperation(AuralisOperation.Kind kind, String message) {
+        return AuralisOperation.failed(kind, new IllegalStateException(message));
     }
 
     @Override
@@ -703,8 +828,8 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         return source != null;
     }
 
-    boolean isBindingRequested() {
-        return bindingRequested.get();
+    boolean isMaterializationRequested() {
+        return materializationRequested.get();
     }
 
     boolean isDisposed() {
@@ -759,7 +884,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         if (completed) {
             // Stop the physical renderer immediately; event delivery is finalized
-            // after the voice-manager pass so STOP precedes UNBIND as in 2.0.
+            // after the voice-manager pass so lifecycle event order stays stable.
             pendingCompletionWasPhysical.set(source != null);
             releasePhysicalVoice(false);
         }
@@ -778,7 +903,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         if (nowNanos <= previous) return;
 
         double elapsed = (nowNanos - previous) * NANOS_TO_SECONDS;
-        double rate = clamp(pitch * speed, 0.01f, 8.0f);
+        double rate = clamp(pitch * speed * calibrationRateMultiplier, 0.01, 8.0);
         logicalPlaybackSeconds += elapsed * rate;
 
         if (looping && durationSeconds > 0.0) {
@@ -832,7 +957,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             long initialBufferedStartToken
     ) {
         if (disposed.get() || resourcesFreed.get()) return PhysicalMaterializationResult.FAILED;
-        if (!bindingRequested.get()) return PhysicalMaterializationResult.FAILED;
+        if (!materializationRequested.get()) return PhysicalMaterializationResult.FAILED;
         if (!startedPlayback.get() || paused.get()) return PhysicalMaterializationResult.FAILED;
         if (!isStreamed && alBuffer == -1) return PhysicalMaterializationResult.FAILED;
         if (initialBufferedStartToken != InitialBufferedPlaybackGuard.NONE
@@ -849,7 +974,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             // Re-check after taking the lifecycle lock. play/stop/dispose may race
             // with the scheduler (async creation can complete off-thread), and a
             // stopped voice must never materialize from a stale pre-lock decision.
-            if (disposed.get() || resourcesFreed.get() || !bindingRequested.get()
+            if (disposed.get() || resourcesFreed.get() || !materializationRequested.get()
                     || !startedPlayback.get() || paused.get()) {
                 return PhysicalMaterializationResult.FAILED;
             }
@@ -936,7 +1061,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                     return PhysicalMaterializationResult.FAILED;
                 }
 
-                fireEvent(AuralisSoundEvent.BIND);
+                fireEvent(AuralisSoundEvent.MATERIALIZED);
                 return initialBufferedStart
                         ? PhysicalMaterializationResult.INITIAL_BUFFERED_START
                         : PhysicalMaterializationResult.MATERIALIZED;
@@ -964,22 +1089,32 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     /** Release only the physical renderer; logical playback keeps advancing. */
     void virtualizePhysicalVoice() {
-        // BIND/UNBIND describe attachment of the scarce physical renderer. The
+        // MATERIALIZED/VIRTUALIZED describe attachment of the scarce renderer. The
         // logical voice remains alive and its playback clock keeps advancing.
+        if (source != null && Double.isFinite(physicalSampleSeconds)) {
+            setLogicalCursor(observedPlaybackPositionSeconds());
+        }
         releasePhysicalVoice(true);
     }
 
-    private void releasePhysicalVoice(boolean fireUnbindEvent) {
+    private void releasePhysicalVoice(boolean fireVirtualizedEvent) {
         synchronized (sourceLifecycleLock) {
             OpenALSourcePool.SourceHandle handle = source;
             if (handle == null) return;
 
             source = null;
+            physicalSampleSeconds = Double.NaN;
+            physicalSampleSourceId = -1;
             final int sourceId = handle.sourceId();
             try {
-                al.executeBlocking(() -> resetSourceOnALThread(sourceId));
-            } catch (Throwable ignored) {
-            } finally {
+                al.submit(() -> {
+                    try {
+                        resetSourceOnALThread(sourceId);
+                    } finally {
+                        sourcePool.release(handle);
+                    }
+                });
+            } catch (Throwable rejected) {
                 sourcePool.release(handle);
             }
 
@@ -990,14 +1125,13 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             if (isStreamed) {
                 int[] buffers = streamingBuffers;
                 streamingBuffers = null;
-                idleStreamingBuffers.clear();
                 if (buffers != null) {
                     bufferCache.deleteBuffers(buffers);
                 }
             }
 
-            if (fireUnbindEvent) {
-                fireEvent(AuralisSoundEvent.UNBIND);
+            if (fireVirtualizedEvent) {
+                fireEvent(AuralisSoundEvent.VIRTUALIZED);
             }
         }
     }
@@ -1025,7 +1159,42 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                     AL10.alSourcef(sourceId, AL11.AL_SEC_OFFSET, (float) cursor);
                 }
             }
-            AL10.alSourcePlay(sourceId);
+            if (startedPlayback.get()) {
+                AL10.alSourcePlay(sourceId);
+                if (paused.get()) AL10.alSourcePause(sourceId);
+            }
+            physicalSampleSeconds = cursor;
+            physicalSampleNanos = System.nanoTime();
+            physicalSampleSourceId = sourceId;
+            physicalSampleState = paused.get() ? AL10.AL_PAUSED : AL10.AL_PLAYING;
+        });
+    }
+
+    private void queueCalibrationSeek(double expectedSeconds) {
+        synchronized (calibrationSeekLock) {
+            latestCalibrationSeekSeconds = expectedSeconds;
+            if (calibrationWorkerQueued) return;
+            calibrationWorkerQueued = true;
+        }
+        submitALTask(() -> {
+            while (true) {
+                double target;
+                synchronized (calibrationSeekLock) {
+                    target = latestCalibrationSeekSeconds;
+                    latestCalibrationSeekSeconds = Double.NaN;
+                }
+                OpenALSourcePool.SourceHandle handle = source;
+                if (handle != null && Double.isFinite(target)) {
+                    setLogicalCursor(target);
+                    restartPhysicalPlaybackFromLogicalCursor(handle);
+                }
+                synchronized (calibrationSeekLock) {
+                    if (!Double.isFinite(latestCalibrationSeekSeconds)) {
+                        calibrationWorkerQueued = false;
+                        return;
+                    }
+                }
+            }
         });
     }
 
@@ -1066,6 +1235,13 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             updateStreamedBuffersOnALThread(sourceId);
         }
 
+        int physicalState = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
+        double offset = Math.max(0.0, AL10.alGetSourcef(sourceId, AL11.AL_SEC_OFFSET));
+        physicalSampleSeconds = isStreamed ? streamingPhysicalBaseSeconds + offset : offset;
+        physicalSampleNanos = System.nanoTime();
+        physicalSampleSourceId = sourceId;
+        physicalSampleState = physicalState;
+
         // Fallback for unusual files/drivers where duration could not be determined.
         boolean sourceCanLoop = dataSource != null && dataSource.isSeekable();
         if ((!looping || !sourceCanLoop) && durationSeconds <= 0.0 && startedPlayback.get() && !paused.get()
@@ -1091,7 +1267,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     private void applyNonGainParams(int sourceId) {
-        float effectivePitch = clamp(pitch * speed, 0.01f, 8.0f);
+        float effectivePitch = (float) clamp(pitch * speed * calibrationRateMultiplier, 0.01, 8.0);
         AL10.alSourcef(sourceId, AL10.AL_PITCH, effectivePitch);
 
         if (isStatic) {
@@ -1283,6 +1459,12 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             // applied its complete spatial state. This is the key anti-flash guard.
             AL10.alSourcef(sourceId, AL10.AL_GAIN, 0.0f);
         } catch (Throwable ignored) {
+        } finally {
+            if (isStreamed) {
+                idleStreamingBuffers.clear();
+                streamingBufferDurations.clear();
+                streamingPhysicalBaseSeconds = 0.0;
+            }
         }
     }
 
@@ -1296,6 +1478,8 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 AL10.alSourceUnqueueBuffers(sourceId, tmp);
                 for (int i = 0; i < processed; i++) {
                     int bufferId = tmp.get(i);
+                    Double consumedSeconds = streamingBufferDurations.remove(bufferId);
+                    if (consumedSeconds != null) streamingPhysicalBaseSeconds += consumedSeconds;
                     if (!refillAndQueue(sourceId, bufferId)) idleStreamingBuffers.addLast(bufferId);
                 }
             } catch (Throwable ignored) {
@@ -1408,8 +1592,11 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         }
 
         int alFormat = streamFormat.channels() == 1 ? AL10.AL_FORMAT_MONO16 : AL10.AL_FORMAT_STEREO16;
+        int pcmBytes = decodeBuffer.remaining();
         AL10.alBufferData(bufferId, alFormat, decodeBuffer, streamFormat.sampleRate());
         AL10.alSourceQueueBuffers(sourceId, bufferId);
+        streamingBufferDurations.put(bufferId,
+                pcmBytes / (double) Math.max(1, streamFormat.frameSizeBytes() * streamFormat.sampleRate()));
         return true;
     }
 
@@ -1431,6 +1618,9 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     private void seekStreamForMaterialization(double cursor) {
         if (dataSource == null) return;
+        idleStreamingBuffers.clear();
+        streamingBufferDurations.clear();
+        streamingPhysicalBaseSeconds = Math.max(0.0, cursor);
         if (dataSource.mode() == AudioSourceMode.TIMELINE) {
             try {
                 dataSource.seekSeconds(cursor);
@@ -1448,16 +1638,19 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         releasePhysicalVoice(false);
         fireEvent(AuralisSoundEvent.STOP);
         if (hadPhysicalSource) {
-            fireEvent(AuralisSoundEvent.UNBIND);
+            fireEvent(AuralisSoundEvent.VIRTUALIZED);
         }
+        localRevision.incrementAndGet();
         if (!autoDisposeOnFinish) {
             return false;
         }
 
         disposed.set(true);
-        bindingRequested.set(false);
+        materializationRequested.set(false);
         freeBuffers();
         pendingEngineRemoval.set(true);
+        localRevision.incrementAndGet();
+        fireEvent(AuralisSoundEvent.DISPOSED);
         return true;
     }
 
@@ -1470,20 +1663,22 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
         pendingNaturalCompletion.set(false);
         pendingCompletionWasPhysical.set(false);
-        bindingRequested.set(false);
+        materializationRequested.set(false);
         startedPlayback.set(false);
         paused.set(false);
         initialBufferedPlayback.invalidate();
         releasePhysicalVoice(true);
         freeBuffers();
-        pendingEngineRemoval.set(false);
+        pendingEngineRemoval.set(true);
+        localRevision.incrementAndGet();
+        fireEvent(AuralisSoundEvent.DISPOSED);
     }
 
     void markDisposedAfterSourcePoolShutdown() {
         disposed.set(true);
         pendingNaturalCompletion.set(false);
         pendingCompletionWasPhysical.set(false);
-        bindingRequested.set(false);
+        materializationRequested.set(false);
         startedPlayback.set(false);
         paused.set(false);
         initialBufferedPlayback.invalidate();
@@ -1494,7 +1689,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         if (!disposed.compareAndSet(false, true)) return;
         pendingNaturalCompletion.set(false);
         pendingCompletionWasPhysical.set(false);
-        bindingRequested.set(false);
+        materializationRequested.set(false);
         startedPlayback.set(false);
         paused.set(false);
         initialBufferedPlayback.invalidate();
@@ -1502,6 +1697,8 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         fireEvent(AuralisSoundEvent.FORCE_STOP);
         freeBuffers();
         pendingEngineRemoval.set(true);
+        localRevision.incrementAndGet();
+        fireEvent(AuralisSoundEvent.DISPOSED);
     }
 
     void onEvicted() {
@@ -1521,11 +1718,10 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             }
 
             try {
-                // This is a barrier behind every previously accepted stream update.
-                // Decoder state, its decode workspace, and OpenAL stream buffers are
-                // all released by their sole owner thread, never by a render/network
-                // thread racing an in-flight native call.
-                al.executeBlocking(() -> freeStreamResourcesOnALThread(buffers));
+                // Ordered behind every previously accepted stream update. Decoder
+                // state and native buffers remain owned by the OpenAL thread without
+                // ever blocking the Minecraft/network thread during an I/O stall.
+                al.submit(() -> freeStreamResourcesOnALThread(buffers));
             } catch (Throwable t) {
                 // Leaking a little native memory during a broken/late shutdown is
                 // safer than freeing it concurrently and crashing the entire JVM.
@@ -1708,6 +1904,10 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     private static float clamp(float v, float min, float max) {
+        return Math.max(min, Math.min(max, v));
+    }
+
+    private static double clamp(double v, double min, double max) {
         return Math.max(min, Math.min(max, v));
     }
 

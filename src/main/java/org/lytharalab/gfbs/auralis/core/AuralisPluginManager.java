@@ -3,6 +3,7 @@ package org.lytharalab.gfbs.auralis.core;
 import net.minecraft.sounds.SoundEvent;
 import org.lytharalab.gfbs.auralis.GFBsAuralis;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
+import org.lytharalab.gfbs.auralis.api.AuralisOperation;
 import org.lytharalab.gfbs.auralis.api.IAuralisEngine;
 import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
 import org.lytharalab.gfbs.auralis.api.effect.AuralisEffectFactory;
@@ -500,16 +501,12 @@ public class AuralisPluginManager implements AuralisPluginService, PluginContext
             private UnsupportedOperationException unavailable() {
                 return new UnsupportedOperationException("Standalone AuralisPluginManager has no audio engine");
             }
-            @Override public AuralisSoundInstance create(SoundEvent soundEvent) { throw unavailable(); }
-            @Override public AuralisSoundInstance createStreamed(SoundEvent soundEvent) { throw unavailable(); }
-            @Override public java.util.concurrent.CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent) {
-                return java.util.concurrent.CompletableFuture.failedFuture(unavailable());
+            @Override public AuralisOperation<AuralisSoundInstance> create(SoundEvent soundEvent) {
+                return AuralisOperation.failed(AuralisOperation.Kind.CREATE, unavailable());
             }
-            @Override public java.util.concurrent.CompletableFuture<AuralisSoundInstance> createStreamedAsync(SoundEvent soundEvent) {
-                return java.util.concurrent.CompletableFuture.failedFuture(unavailable());
+            @Override public AuralisOperation<AuralisSoundInstance> createStreamed(SoundEvent soundEvent) {
+                return AuralisOperation.failed(AuralisOperation.Kind.CREATE, unavailable());
             }
-            @Override public void bind(AuralisSoundInstance instance) { throw unavailable(); }
-            @Override public void unbind(AuralisSoundInstance instance) { throw unavailable(); }
             @Override public void tick() { }
             @Override public AudioBusSystem buses() { return buses; }
             @Override public AuralisEffectRegistry effects() { return effects; }

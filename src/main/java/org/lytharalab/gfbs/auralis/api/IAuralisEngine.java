@@ -30,33 +30,25 @@ import org.lytharalab.gfbs.auralis.api.source.AudioDataSource;
 import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceRegistry;
 import org.lytharalab.gfbs.auralis.api.source.AudioSourceRequest;
 
-import java.util.concurrent.CompletableFuture;
-
 public interface IAuralisEngine {
-    AuralisSoundInstance create(SoundEvent soundEvent);
-    AuralisSoundInstance createStreamed(SoundEvent soundEvent);
-
-    CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent);
-    CompletableFuture<AuralisSoundInstance> createStreamedAsync(SoundEvent soundEvent);
+    AuralisOperation<AuralisSoundInstance> create(SoundEvent soundEvent);
+    AuralisOperation<AuralisSoundInstance> createStreamed(SoundEvent soundEvent);
 
     /** Creates a voice from an already-open source and transfers source ownership to the engine. */
-    default AuralisSoundInstance create(AudioDataSource source) {
-        throw new UnsupportedOperationException("Custom audio data sources require Auralis 2.3.0");
+    default AuralisOperation<AuralisSoundInstance> create(AudioDataSource source) {
+        return AuralisOperation.failed(AuralisOperation.Kind.CREATE,
+                new UnsupportedOperationException("Custom audio data sources require Auralis 2.3.0"));
     }
 
     /** Creates a voice through a plugin-registered source factory. */
-    default AuralisSoundInstance create(String sourceType, AudioSourceRequest request) {
+    default AuralisOperation<AuralisSoundInstance> create(String sourceType, AudioSourceRequest request) {
         try {
             return create(dataSources().create(sourceType, request));
-        } catch (RuntimeException failure) {
-            throw failure;
         } catch (Exception failure) {
-            throw new IllegalStateException("Failed to create custom audio data source: " + sourceType, failure);
+            return AuralisOperation.failed(AuralisOperation.Kind.CREATE,
+                    new IllegalStateException("Failed to create custom audio data source: " + sourceType, failure));
         }
     }
-
-    void bind(AuralisSoundInstance instance);
-    void unbind(AuralisSoundInstance instance);
 
     void tick();
 

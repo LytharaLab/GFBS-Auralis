@@ -27,17 +27,14 @@ import org.lytharalab.gfbs.auralis.api.processing.AudioProcessor;
 import java.util.List;
 
 public interface AuralisSoundInstance {
-    static void bind(AuralisSoundInstance instance) {
-        AuralisApi.engine().bind(instance);
-    }
+    AuralisOperation<AuralisSoundSnapshot> play();
+    AuralisOperation<AuralisSoundSnapshot> pause();
+    AuralisOperation<AuralisSoundSnapshot> stop();
+    AuralisOperation<AuralisSoundSnapshot> seek(double positionSeconds);
+    AuralisOperation<AuralisSoundSnapshot> dispose();
 
-    static void unbind(AuralisSoundInstance instance) {
-        AuralisApi.engine().unbind(instance);
-    }
-
-    void play();
-    void pause();
-    void stop();
+    /** Current logical/physical state; safe to inspect from any thread. */
+    AuralisSoundSnapshot snapshot();
 
     /**
      * Returns the logical playback state. Since 2.1.0 this can remain {@code true}
@@ -70,19 +67,19 @@ public interface AuralisSoundInstance {
      * Returns whether this logical instance currently owns a physical OpenAL Source.
      * A playing 2.1.0 instance may legitimately return {@code false} here while virtual.
      */
-    boolean isBound();
+    boolean isMaterialized();
 
     /**
      * Returns true when the logical voice is playing but currently has no physical
      * OpenAL Source. Virtual voices continue advancing their playback timeline.
      */
     default boolean isVirtual() {
-        return isPlaying() && !isBound();
+        return isPlaying() && !isMaterialized();
     }
 
     /**
-     * Current authoritative logical playback position in source-media seconds.
-     * This advances while the voice is virtual.
+     * Current source-media position. A materialized voice reports the sampled
+     * physical renderer cursor; a virtual voice reports its logical cursor.
      */
     default double getPlaybackPositionSeconds() {
         return 0.0;
@@ -123,8 +120,7 @@ public interface AuralisSoundInstance {
      * <p>
      * When disabled, Auralis still releases the scarce OpenAL source after playback ends,
      * but keeps the logical instance and its audio resources alive so {@link #play()} can
-     * start it again. Call {@link #unbind(AuralisSoundInstance)} when the instance is no
-     * longer needed.
+     * start it again. Call {@link #dispose()} when the instance is no longer needed.
      *
      * @param enabled {@code true} to dispose automatically; {@code false} to retain the instance
      * @return this instance

@@ -23,6 +23,7 @@ package org.lytharalab.gfbs.auralis;
  */
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.lytharalab.gfbs.auralis.command.SoundCommand;
@@ -38,7 +39,12 @@ public class ServerSetup {
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
-        AuralisServerManager.onServerStop();
+        AuralisServerManager.onServerStop(event.getServer());
+    }
+
+    @SubscribeEvent
+    public static void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase == TickEvent.Phase.END) AuralisServerManager.tick(event.getServer());
     }
 
     public static void init() {

@@ -188,3 +188,15 @@ tasks.withType(JavaCompile).configureEach {
 tasks.withType(JavaCompile).configureEach {
     options.warnings = false
 }
+
+tasks.register('timelineSyncSelfTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs deterministic Auralis authoritative timeline and calibration tests.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'org.lytharalab.gfbs.auralis.TimelineSynchronizationSelfTest'
+    dependsOn testClasses
+}
+
+tasks.named('check').configure {
+    dependsOn tasks.named('timelineSyncSelfTest')
+}

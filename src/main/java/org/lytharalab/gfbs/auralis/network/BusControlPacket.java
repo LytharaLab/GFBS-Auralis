@@ -2,17 +2,15 @@ package org.lytharalab.gfbs.auralis.network;
 
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraftforge.network.NetworkEvent;
-import org.lytharalab.gfbs.auralis.ClientSoundController;
 import org.lytharalab.gfbs.auralis.GFBsAuralis;
 import org.lytharalab.gfbs.auralis.api.AuralisApi;
 import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
 
 import java.util.function.Supplier;
 
-/** Bounded server-to-client real-time bus and instance-routing control. */
+/** Bounded server-to-client real-time bus-topology control. */
 public record BusControlPacket(Action action, String target, String parent, float value, boolean flag) {
     public enum Action {
-        SET_INSTANCE_BUS,
         CREATE_BUS,
         REMOVE_BUS,
         SET_PARENT,
@@ -25,7 +23,7 @@ public record BusControlPacket(Action action, String target, String parent, floa
     private static final int MAX_NAME = 96;
 
     public BusControlPacket {
-        if (action == null) action = Action.SET_INSTANCE_BUS;
+        if (action == null) action = Action.CREATE_BUS;
         target = target == null ? "" : target;
         parent = parent == null ? AudioBusSystem.MASTER : parent;
     }
@@ -59,10 +57,6 @@ public record BusControlPacket(Action action, String target, String parent, floa
         ctx.enqueueWork(() -> {
             if (!ctx.getDirection().getReceptionSide().isClient()) return;
             try {
-                if (packet.action == Action.SET_INSTANCE_BUS) {
-                    ClientSoundController.setBus(packet.target, packet.parent);
-                    return;
-                }
                 if (!AuralisApi.isInitialized()) return;
                 var buses = AuralisApi.buses();
                 switch (packet.action) {
@@ -75,7 +69,6 @@ public record BusControlPacket(Action action, String target, String parent, floa
                     case SET_MUTED -> buses.requireBus(packet.target).setMuted(packet.flag);
                     case SET_SOLO -> buses.requireBus(packet.target).setSolo(packet.flag);
                     case SET_EFFECTS_BYPASSED -> buses.requireBus(packet.target).setEffectsBypassed(packet.flag);
-                    case SET_INSTANCE_BUS -> { }
                 }
             } catch (Throwable failure) {
                 GFBsAuralis.LOGGER.warn("Rejected invalid remote Auralis bus operation {} for {}", packet.action, packet.target, failure);

@@ -33,7 +33,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class NetworkHandler {
-    private static final String PROTOCOL_VERSION = "3";
+    private static final String PROTOCOL_VERSION = "4";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(GFBsAuralis.MODID, "gfbs_auralis_main"),
             () -> PROTOCOL_VERSION,
@@ -44,18 +44,20 @@ public class NetworkHandler {
     private static int packetId = 0;
 
     public static void registerMessages() {
-        registerMessage(SyncSoundPacket.class, SyncSoundPacket::encode, SyncSoundPacket::decode, SyncSoundPacket::handle);
-        registerMessage(PlaySoundPacket.class, PlaySoundPacket::encode, PlaySoundPacket::decode, PlaySoundPacket::handle);
-        registerMessage(StopSoundPacket.class, StopSoundPacket::encode, StopSoundPacket::decode, StopSoundPacket::handle);
-        registerMessage(LoopSoundPacket.class, LoopSoundPacket::encode, LoopSoundPacket::decode, LoopSoundPacket::handle);
-
-        // New: server->client sound control for the /auralis command
-        registerMessage(SoundControlPacket.class, SoundControlPacket::encode, SoundControlPacket::decode, SoundControlPacket::handle);
-
-        // New: server->client tween control for the /auralis tween command
-        registerMessage(TweenControlPacket.class, TweenControlPacket::encode, TweenControlPacket::decode, TweenControlPacket::handle);
-
-        registerMessage(BindControlPacket.class, BindControlPacket::encode, BindControlPacket::decode, BindControlPacket::handle);
+        registerMessage(AuthoritativeSoundStatePacket.class, AuthoritativeSoundStatePacket::encode,
+                AuthoritativeSoundStatePacket::decode, AuthoritativeSoundStatePacket::handle);
+        registerMessage(AuthoritativeSnapshotPacket.class, AuthoritativeSnapshotPacket::encode,
+                AuthoritativeSnapshotPacket::decode, AuthoritativeSnapshotPacket::handle);
+        registerMessage(ClientSoundAckPacket.class, ClientSoundAckPacket::encode,
+                ClientSoundAckPacket::decode, ClientSoundAckPacket::handle);
+        registerMessage(ClientTimeProbePacket.class, ClientTimeProbePacket::encode,
+                ClientTimeProbePacket::decode, ClientTimeProbePacket::handle);
+        registerMessage(ServerTimeSyncPacket.class, ServerTimeSyncPacket::encode,
+                ServerTimeSyncPacket::decode, ServerTimeSyncPacket::handle);
+        registerMessage(ClientSoundRequestPacket.class, ClientSoundRequestPacket::encode,
+                ClientSoundRequestPacket::decode, ClientSoundRequestPacket::handle);
+        registerMessage(ClientRequestResultPacket.class, ClientRequestResultPacket::encode,
+                ClientRequestResultPacket::decode, ClientRequestResultPacket::handle);
         registerMessage(BusControlPacket.class, BusControlPacket::encode, BusControlPacket::decode, BusControlPacket::handle);
     }
 

@@ -33,7 +33,6 @@ import org.lytharalab.gfbs.auralis.api.source.AudioDataSourceRegistry;
 import org.lytharalab.gfbs.auralis.api.source.AudioSourceRequest;
 
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class AuralisApi {
@@ -132,23 +131,17 @@ public final class AuralisApi {
         return id;
     }
 
-    public static AuralisSoundInstance create(SoundEvent soundEvent) {
+    public static AuralisOperation<AuralisSoundInstance> create(SoundEvent soundEvent) {
         IAuralisEngine engine = ENGINE;
-        if (engine == null) {
-            return new ServerPlaceholderSoundInstance();
-        }
-        return engine.create(soundEvent);
+        return engine == null ? unavailableCreation() : engine.create(soundEvent);
     }
 
-    public static AuralisSoundInstance createStreamed(SoundEvent soundEvent) {
+    public static AuralisOperation<AuralisSoundInstance> createStreamed(SoundEvent soundEvent) {
         IAuralisEngine engine = ENGINE;
-        if (engine == null) {
-            return new ServerPlaceholderSoundInstance();
-        }
-        return engine.createStreamed(soundEvent);
+        return engine == null ? unavailableCreation() : engine.createStreamed(soundEvent);
     }
 
-    public static AuralisSoundInstance create(AudioDataSource source) {
+    public static AuralisOperation<AuralisSoundInstance> create(AudioDataSource source) {
         java.util.Objects.requireNonNull(source, "source");
         IAuralisEngine engine = ENGINE;
         if (engine != null) return engine.create(source);
@@ -156,58 +149,16 @@ public final class AuralisApi {
             source.close();
         } catch (Exception ignored) {
         }
-        return new ServerPlaceholderSoundInstance();
+        return unavailableCreation();
     }
 
-    public static AuralisSoundInstance create(String sourceType, AudioSourceRequest request) {
-        return engine().create(sourceType, request);
-    }
-
-    public static CompletableFuture<AuralisSoundInstance> createAsync(SoundEvent soundEvent) {
+    public static AuralisOperation<AuralisSoundInstance> create(String sourceType, AudioSourceRequest request) {
         IAuralisEngine engine = ENGINE;
-        if (engine == null) {
-            return CompletableFuture.completedFuture(new ServerPlaceholderSoundInstance());
-        }
-        return engine.createAsync(soundEvent);
+        return engine == null ? unavailableCreation() : engine.create(sourceType, request);
     }
 
-    public static CompletableFuture<AuralisSoundInstance> createStreamedAsync(SoundEvent soundEvent) {
-        IAuralisEngine engine = ENGINE;
-        if (engine == null) {
-            return CompletableFuture.completedFuture(new ServerPlaceholderSoundInstance());
-        }
-        return engine.createStreamedAsync(soundEvent);
-    }
-
-    static class ServerPlaceholderSoundInstance implements AuralisSoundInstance {
-        @Override public void play() {}
-        @Override public void pause() {}
-        @Override public void stop() {}
-        @Override public boolean isPlaying() { return false; }
-        @Override public boolean isPaused() { return false; }
-        @Override public boolean isBound() { return false; }
-        @Override public AuralisSoundInstance setVolume(float volume) { return this; }
-        @Override public float getVolume() { return 1.0f; }
-        @Override public AuralisSoundInstance setPitch(float pitch) { return this; }
-        @Override public float getPitch() { return 1.0f; }
-        @Override public AuralisSoundInstance setSpeed(float speed) { return this; }
-        @Override public float getSpeed() { return 1.0f; }
-        @Override public AuralisSoundInstance setStatic(boolean isStatic) { return this; }
-        @Override public boolean isStatic() { return false; }
-        @Override public AuralisSoundInstance setPosition(net.minecraft.world.phys.Vec3 pos) { return this; }
-        @Override public net.minecraft.world.phys.Vec3 getPosition() { return net.minecraft.world.phys.Vec3.ZERO; }
-        @Override public AuralisSoundInstance setMinDistance(float dist) { return this; }
-        @Override public float getMinDistance() { return 1.0f; }
-        @Override public AuralisSoundInstance setMaxDistance(float dist) { return this; }
-        @Override public float getMaxDistance() { return 48.0f; }
-        @Override public AuralisSoundInstance setLooping(boolean looping) { return this; }
-        @Override public boolean isLooping() { return false; }
-        @Override public AuralisSoundInstance setAutoDisposeOnFinish(boolean enabled) { return this; }
-        @Override public boolean isAutoDisposeOnFinish() { return true; }
-        @Override public AuralisSoundInstance setPriority(int priority) { return this; }
-        @Override public int getPriority() { return 50; }
-        @Override public AuralisSoundInstance addListener(AuralisSoundListener listener) { return this; }
-        @Override public AuralisSoundInstance removeListener(AuralisSoundListener listener) { return this; }
-        @Override public AuralisSoundInstance addProcessor(org.lytharalab.gfbs.auralis.api.processing.AudioProcessor processor) { return this; }
+    private static AuralisOperation<AuralisSoundInstance> unavailableCreation() {
+        return AuralisOperation.failed(AuralisOperation.Kind.CREATE, new IllegalStateException(
+                "Auralis client engine is unavailable. Use AuralisServerApi for server-authoritative audio."));
     }
 }

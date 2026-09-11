@@ -178,8 +178,8 @@ The context deliberately exposes no `AuralisAL`, ALC device/context handle, inte
 - `setEnabled`, `setWet`, EFX parameter setters, filter setters, and custom `markChanged()` updates are revision-driven and safe to make at runtime.
 - Moving/removing effects or changing bus parents takes effect through the next immutable tick snapshot.
 
-## Server and command control
+## Server-authoritative routing
 
-`AuralisServerApi` supplies client-bound helpers for `createBus`, `removeBus`, `setBusParent`, `setBusVolume`, `setBusMuted`, `setBusSolo`, `setBusEffectsBypassed`, and per-sound `setBus`. Every helper accepts an explicit collection of target players.
+In 2.4 a synchronized sound's bus name is part of its immutable `AuralisSoundSpec`, so routing changes travel through a normal authoritative revision and participate in operation ACKs. Per-instance bus packets were removed.
 
-The matching commands are documented in the project README. Bus packets use bounded 96-character fields, validate operations on the client, and require protocol version `3`. Effects themselves remain client/plugin objects rather than arbitrary network-serialized code.
+Bus topology and effect objects remain client/plugin-owned because executable effects are not network-serialized. OP2 bus commands may still send bounded topology/property changes to selected clients; these do not carry per-sound playback state. A missing named bus received in an authoritative sound specification is created beneath `Master` before the sound is applied. Protocol version 4 uses bounded names and validates all decoded sound specifications.

@@ -29,7 +29,9 @@ public class GFBsAuralisConfig {
         public final ForgeConfigSpec.IntValue maxConcurrentSounds;
         public final ForgeConfigSpec.DoubleValue defaultVolume;
         public final ForgeConfigSpec.BooleanValue enableRemoteSounds;
-        public final ForgeConfigSpec.BooleanValue allowClientSync;
+        public final ForgeConfigSpec.BooleanValue allowClientRequests;
+        public final ForgeConfigSpec.IntValue acknowledgementTimeoutTicks;
+        public final ForgeConfigSpec.IntValue timelineSyncIntervalTicks;
 
         ServerConfig(ForgeConfigSpec.Builder builder) {
             builder.comment("Server configuration for GFBS-Auralis")
@@ -47,9 +49,17 @@ public class GFBsAuralisConfig {
                     .comment("Enable playing sounds from remote locations")
                     .define("enableRemoteSounds", true);
 
-            allowClientSync = builder
-                    .comment("Allow client->server sound state sync packets (not recommended)")
-                    .define("allowClientSync", false);
+            allowClientRequests = builder
+                    .comment("Allow validated client requests for client-owned authoritative sounds")
+                    .define("allowClientRequests", false);
+
+            acknowledgementTimeoutTicks = builder
+                    .comment("Ticks a server operation waits for client execution acknowledgements")
+                    .defineInRange("acknowledgementTimeoutTicks", 100, 20, 1200);
+
+            timelineSyncIntervalTicks = builder
+                    .comment("Interval for authoritative heartbeat snapshots")
+                    .defineInRange("timelineSyncIntervalTicks", 10, 1, 200);
 
             builder.pop();
         }
@@ -65,6 +75,11 @@ public class GFBsAuralisConfig {
         public final ForgeConfigSpec.DoubleValue voiceMaterializeGain;
         public final ForgeConfigSpec.DoubleValue voiceVirtualizeGain;
         public final ForgeConfigSpec.BooleanValue enableHrtf;
+        public final ForgeConfigSpec.IntValue clockProbeIntervalTicks;
+        public final ForgeConfigSpec.DoubleValue timelineSettledToleranceMs;
+        public final ForgeConfigSpec.DoubleValue timelineHardSeekThresholdMs;
+        public final ForgeConfigSpec.DoubleValue timelineConvergenceSeconds;
+        public final ForgeConfigSpec.DoubleValue timelineMaximumRateAdjustment;
 
         ClientConfig(ForgeConfigSpec.Builder builder) {
             builder.comment("Client configuration for GFBS-Auralis")
@@ -105,6 +120,26 @@ public class GFBsAuralisConfig {
             enableHrtf = builder
                     .comment("Enable OpenAL HRTF if supported by the device")
                     .define("enableHrtf", false);
+
+            clockProbeIntervalTicks = builder
+                    .comment("Interval for server service-tick RTT probes")
+                    .defineInRange("clockProbeIntervalTicks", 40, 5, 1200);
+
+            timelineSettledToleranceMs = builder
+                    .comment("Physical cursor error treated as settled, in milliseconds")
+                    .defineInRange("timelineSettledToleranceMs", 25.0, 0.0, 500.0);
+
+            timelineHardSeekThresholdMs = builder
+                    .comment("Physical cursor error that triggers a hard asynchronous seek")
+                    .defineInRange("timelineHardSeekThresholdMs", 750.0, 50.0, 10000.0);
+
+            timelineConvergenceSeconds = builder
+                    .comment("Target time for correcting small drift by rate adjustment")
+                    .defineInRange("timelineConvergenceSeconds", 2.0, 0.1, 30.0);
+
+            timelineMaximumRateAdjustment = builder
+                    .comment("Maximum fractional playback-rate adjustment used for drift correction")
+                    .defineInRange("timelineMaximumRateAdjustment", 0.04, 0.0, 0.5);
 
             builder.pop();
         }
