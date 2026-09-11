@@ -142,6 +142,7 @@ public final class AuralisServerManager {
             sound.global = false;
             sound.audience = nextAudience;
             sound.revision = increment(sound.revision, "revision");
+            authority.scheduleNaturalCompletion(sound);
             AuthoritativeSoundSnapshot snapshot = sound.snapshot();
             Set<UUID> nextRecipients = sound.recipients();
             Set<UUID> all = new HashSet<>(oldRecipients);
@@ -177,9 +178,9 @@ public final class AuralisServerManager {
         authority.acknowledge(player.getUUID(), ack);
     }
 
-    public static void tick(MinecraftServer server) {
+    public static void maintenanceTick(MinecraftServer server) {
         Authority authority = AUTHORITIES.get(server);
-        if (authority != null) authority.tick();
+        if (authority != null) authority.maintenanceTick();
     }
 
     /** Monotonic 20 Hz service timeline used by packets and state anchors. */
@@ -215,6 +216,7 @@ public final class AuralisServerManager {
             MutableSound sound = authority.require(handle);
             mutation.apply(sound);
             sound.revision = increment(sound.revision, "revision");
+            authority.scheduleNaturalCompletion(sound);
             authority.broadcast(operationId, sound.snapshot(), sound.recipients())
                     .whenComplete((value, failure) -> complete(result, value, failure));
         });
@@ -281,6 +283,7 @@ public final class AuralisServerManager {
         volatile long anchorServerTick;
         volatile double anchorPositionSeconds;
         volatile double durationSeconds;
+        NaturalCompletionDeadline naturalCompletionDeadline;
 
         MutableSound(MinecraftServer server, String id, long epoch, AuralisSoundSpec spec,
                      Set<UUID> audience, long serverTick) {
@@ -321,8 +324,14 @@ public final class AuralisServerManager {
         final MinecraftServer server;
         final Map<String, MutableSound> sounds = new ConcurrentHashMap<>();
         final Map<UUID, PendingOperation> pending = new HashMap<>();
+        final PriorityQueue<PendingOperation> pendingDeadlines = new PriorityQueue<>(
+                Comparator.comparingLong(operation -> operation.deadlineTick));
+        final NavigableSet<NaturalCompletionDeadline> naturalCompletionDeadlines = new TreeSet<>(
+                Comparator.comparingLong(NaturalCompletionDeadline::deadlineTick)
+                        .thenComparing(NaturalCompletionDeadline::soundId)
+                        .thenComparingLong(NaturalCompletionDeadline::epoch)
+                        .thenComparingLong(NaturalCompletionDeadline::revision));
         long epochCounter;
-        long lastSnapshotTick = Long.MIN_VALUE;
 
         Authority(MinecraftServer server) { this.server = server; }
 
@@ -375,7 +384,12 @@ public final class AuralisServerManager {
             }
             PendingOperation operation = new PendingOperation(operationId, snapshot, waiting, immediate,
                     serviceTick(server) + GFBsAuralisConfig.SERVER.acknowledgementTimeoutTicks.get());
-            if (waiting.isEmpty()) operation.complete(); else pending.put(operationId, operation);
+            if (waiting.isEmpty()) {
+                operation.complete();
+            } else {
+                pending.put(operationId, operation);
+                pendingDeadlines.add(operation);
+            }
             return operation.future;
         }
 
@@ -397,6 +411,7 @@ public final class AuralisServerManager {
                     && (ack.status() == ClientExecutionStatus.APPLIED || ack.status() == ClientExecutionStatus.STALE)
                     && Double.isFinite(ack.durationSeconds()) && ack.durationSeconds() > 0.0 && ack.durationSeconds() <= 86_400.0) {
                 sound.durationSeconds = ack.durationSeconds();
+                scheduleNaturalCompletion(sound);
             }
             if (operation.waiting.isEmpty()) {
                 pending.remove(operation.operationId);
@@ -404,14 +419,26 @@ public final class AuralisServerManager {
             }
         }
 
-        void tick() {
+        /**
+         * Dispatches only deadlines that are actually due. State replication is
+         * event-driven and never runs from the server tick hook.
+         */
+        void maintenanceTick() {
             long tick = serviceTick(server);
-            List<MutableSound> naturalStops = new ArrayList<>();
-            for (MutableSound sound : sounds.values()) {
-                if (sound.state == AuralisPlaybackState.PLAYING && !sound.spec.looping() && sound.durationSeconds > 0.0
-                        && sound.currentPosition() >= sound.durationSeconds) naturalStops.add(sound);
-            }
-            for (MutableSound sound : naturalStops) {
+
+            while (!naturalCompletionDeadlines.isEmpty()
+                    && naturalCompletionDeadlines.first().deadlineTick() <= tick) {
+                NaturalCompletionDeadline deadline = naturalCompletionDeadlines.pollFirst();
+                MutableSound sound = sounds.get(deadline.soundId());
+                if (sound == null || sound.epoch != deadline.epoch() || sound.revision != deadline.revision()
+                        || sound.naturalCompletionDeadline != deadline
+                        || sound.state != AuralisPlaybackState.PLAYING || sound.spec.looping()
+                        || !(sound.durationSeconds > 0.0)) continue;
+                sound.naturalCompletionDeadline = null;
+                if (sound.currentPosition() < sound.durationSeconds) {
+                    scheduleNaturalCompletion(sound);
+                    continue;
+                }
                 sound.anchorPositionSeconds = sound.durationSeconds;
                 sound.anchorServerTick = tick;
                 sound.state = AuralisPlaybackState.STOPPED;
@@ -419,21 +446,35 @@ public final class AuralisServerManager {
                 broadcastUntracked(sound.snapshot(), sound.recipients());
             }
 
-            List<PendingOperation> timedOut = new ArrayList<>();
-            for (PendingOperation operation : pending.values()) if (tick >= operation.deadlineTick) timedOut.add(operation);
-            for (PendingOperation operation : timedOut) {
-                pending.remove(operation.operationId);
+            while (!pendingDeadlines.isEmpty() && pendingDeadlines.peek().deadlineTick <= tick) {
+                PendingOperation operation = pendingDeadlines.poll();
+                if (!pending.remove(operation.operationId, operation)) continue;
                 for (UUID playerId : operation.waiting) operation.results.put(playerId,
                         new ClientExecutionResult(playerId, ClientExecutionStatus.TIMED_OUT, "Client ACK timed out", 0.0));
                 operation.waiting.clear();
                 operation.complete();
             }
+        }
 
-            int interval = GFBsAuralisConfig.SERVER.timelineSyncIntervalTicks.get();
-            if (lastSnapshotTick == Long.MIN_VALUE || tick - lastSnapshotTick >= interval) {
-                lastSnapshotTick = tick;
-                for (ServerPlayer player : server.getPlayerList().getPlayers()) sendAtomicSnapshot(player, true);
+        void scheduleNaturalCompletion(MutableSound sound) {
+            NaturalCompletionDeadline previous = sound.naturalCompletionDeadline;
+            if (previous != null) {
+                naturalCompletionDeadlines.remove(previous);
+                sound.naturalCompletionDeadline = null;
             }
+            if (sound.state != AuralisPlaybackState.PLAYING || sound.spec.looping()
+                    || !(sound.durationSeconds > 0.0) || !Double.isFinite(sound.durationSeconds)) return;
+
+            long nowTick = serviceTick(server);
+            double remainingSeconds = Math.max(0.0, sound.durationSeconds - sound.currentPosition());
+            double mediaRate = Math.max(0.01, sound.spec.pitch() * sound.spec.speed());
+            long remainingTicks = (long) Math.ceil(remainingSeconds / (mediaRate * 0.05));
+            long deadlineTick = remainingTicks > Long.MAX_VALUE - nowTick
+                    ? Long.MAX_VALUE : nowTick + remainingTicks;
+            NaturalCompletionDeadline deadline = new NaturalCompletionDeadline(
+                    sound.id, sound.epoch, sound.revision, deadlineTick);
+            sound.naturalCompletionDeadline = deadline;
+            naturalCompletionDeadlines.add(deadline);
         }
 
         void disconnect(UUID playerId) {
@@ -479,9 +520,13 @@ public final class AuralisServerManager {
                 operation.complete();
             }
             pending.clear();
+            pendingDeadlines.clear();
+            naturalCompletionDeadlines.clear();
             sounds.clear();
         }
     }
+
+    private record NaturalCompletionDeadline(String soundId, long epoch, long revision, long deadlineTick) { }
 
     private static final class PendingOperation {
         final UUID operationId;

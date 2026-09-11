@@ -44,7 +44,7 @@ public class ServerSetup {
 
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase == TickEvent.Phase.END) AuralisServerManager.tick(event.getServer());
+        if (event.phase == TickEvent.Phase.END) AuralisServerManager.maintenanceTick(event.getServer());
     }
 
     public static void init() {

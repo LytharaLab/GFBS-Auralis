@@ -16,7 +16,8 @@ The dedicated server does not initialize OpenAL, resolve sound resources or deco
 - Server operations aggregate all client results and time out deterministically.
 - Recreating an ID uses a new epoch and sends a disposal tombstone for the old epoch.
 - Full snapshots are assembled from bounded chunks before application. They repair missing state and remove mirrors no longer visible to that player.
-- Login, dimension change and periodic heartbeats send full snapshots.
+- Login and dimension change send one full snapshot. There is no periodic state or timeline broadcast.
+- A short client-side RTT sampling burst starts only when an authoritative mirror exists. Afterwards, a tiny clock probe runs at a low configurable rate (60 seconds by default), and can be disabled; it never carries sound state.
 
 ## Real-time physical cursor calibration
 
@@ -39,7 +40,7 @@ Looping sounds use the shortest wrapped error. Hard seeks are coalesced: while d
 
 1. Disk I/O or a custom `AudioDataSource.read` blocks the OpenAL thread.
 2. The last physical sample becomes stale and stops being extrapolated.
-3. The server tick estimate continues advancing from the authoritative service timeline.
+3. The client locally projects the authoritative service timeline; no heartbeat packet is required.
 4. Drift crosses the hard threshold; one coalesced repair is queued.
 5. Further ticks update that repair to the newest expected position.
 6. When I/O resumes, the OpenAL thread rebuilds/seeks the stream and restarts from the current authoritative position.

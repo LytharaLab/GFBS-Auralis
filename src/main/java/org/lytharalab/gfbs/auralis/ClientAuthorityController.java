@@ -16,11 +16,16 @@ import java.util.concurrent.CompletionException;
 /** Client mirrors of server-owned voices. All entry points run on the Minecraft client thread. */
 @OnlyIn(Dist.CLIENT)
 public final class ClientAuthorityController {
+    private static final int CLOCK_BOOTSTRAP_PROBES = 3;
+    private static final long CLOCK_BOOTSTRAP_INTERVAL_TICKS = 10L;
+    private static final long CLOCK_PROBE_RETRY_TICKS = 20L;
     private static final Map<String, Mirror> MIRRORS = new HashMap<>();
     private static final Map<UUID, SnapshotAssembly> ASSEMBLIES = new HashMap<>();
     private static final ServerTickEstimator SERVER_CLOCK = new ServerTickEstimator();
     private static long clientTick;
     private static long probeNonce;
+    private static long nextClockProbeTick;
+    private static int clockBootstrapProbesRemaining = CLOCK_BOOTSTRAP_PROBES;
 
     private ClientAuthorityController() { }
 
@@ -55,22 +60,22 @@ public final class ClientAuthorityController {
 
     public static void accept(ServerTimeSyncPacket packet, long receiveNanos) {
         SERVER_CLOCK.accept(packet.clientSendNanos(), receiveNanos, packet.serverTick());
+        if (clockBootstrapProbesRemaining > 0) {
+            clockBootstrapProbesRemaining--;
+            if (clockBootstrapProbesRemaining == 0) scheduleMaintenanceProbe();
+        }
     }
 
     public static void tick() {
         if (Minecraft.getInstance().getConnection() == null) return;
         clientTick++;
-        if (clientTick % GFBsAuralisConfig.CLIENT.clockProbeIntervalTicks.get() == 0L) {
-            long now = System.nanoTime();
-            try {
-                NetworkHandler.CHANNEL.sendToServer(new ClientTimeProbePacket(++probeNonce, now));
-            } catch (Throwable failure) {
-                GFBsAuralis.LOGGER.debug("Unable to send Auralis clock probe: {}", failure.getMessage());
-            }
-        }
 
         long cutoff = System.nanoTime() - 10_000_000_000L;
         ASSEMBLIES.entrySet().removeIf(entry -> entry.getValue().createdNanos < cutoff);
+        if (MIRRORS.isEmpty()) return;
+
+        sendClockProbeIfDue();
+        if (!SERVER_CLOCK.isInitialized()) return;
 
         TimelineCalibrationPolicy policy = calibrationPolicy();
         long now = System.nanoTime();
@@ -103,6 +108,9 @@ public final class ClientAuthorityController {
         ASSEMBLIES.clear();
         SERVER_CLOCK.reset();
         clientTick = 0L;
+        probeNonce = 0L;
+        nextClockProbeTick = 0L;
+        clockBootstrapProbesRemaining = CLOCK_BOOTSTRAP_PROBES;
     }
 
     private static void apply(AuthoritativeSoundSnapshot snapshot, UUID operationId) {
@@ -114,6 +122,10 @@ public final class ClientAuthorityController {
         }
         if (current == null || snapshot.epoch() > current.epoch) {
             if (current != null) current.dispose();
+            if (MIRRORS.isEmpty() && snapshot.state() != AuralisPlaybackState.DISPOSED) {
+                clockBootstrapProbesRemaining = CLOCK_BOOTSTRAP_PROBES;
+                nextClockProbeTick = clientTick;
+            }
             current = new Mirror(snapshot.id(), snapshot.epoch());
             MIRRORS.put(snapshot.id(), current);
         }
@@ -194,6 +206,28 @@ public final class ClientAuthorityController {
                 hard,
                 GFBsAuralisConfig.CLIENT.timelineConvergenceSeconds.get(),
                 GFBsAuralisConfig.CLIENT.timelineMaximumRateAdjustment.get());
+    }
+
+    private static void sendClockProbeIfDue() {
+        if (clientTick < nextClockProbeTick) return;
+        long now = System.nanoTime();
+        try {
+            NetworkHandler.CHANNEL.sendToServer(new ClientTimeProbePacket(++probeNonce, now));
+            if (clockBootstrapProbesRemaining > 0) {
+                nextClockProbeTick = clientTick + CLOCK_BOOTSTRAP_INTERVAL_TICKS;
+                return;
+            }
+            scheduleMaintenanceProbe();
+        } catch (Throwable failure) {
+            nextClockProbeTick = clientTick + CLOCK_PROBE_RETRY_TICKS;
+            GFBsAuralis.LOGGER.debug("Unable to send Auralis clock probe: {}", failure.getMessage());
+        }
+    }
+
+    private static void scheduleMaintenanceProbe() {
+        int maintenanceInterval = GFBsAuralisConfig.CLIENT.clockProbeIntervalTicks.get();
+        nextClockProbeTick = maintenanceInterval == 0
+                ? Long.MAX_VALUE : clientTick + maintenanceInterval;
     }
 
     private static void removeMirror(String id) {

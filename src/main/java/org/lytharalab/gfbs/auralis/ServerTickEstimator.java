@@ -30,6 +30,10 @@ public final class ServerTickEstimator {
         return initialized ? estimateLocked(clientNanos) : fallbackServerTick;
     }
 
+    public synchronized boolean isInitialized() {
+        return initialized;
+    }
+
     public synchronized void reset() {
         initialized = false;
         anchorServerTick = 0.0;

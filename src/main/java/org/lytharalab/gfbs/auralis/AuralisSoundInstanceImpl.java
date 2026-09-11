@@ -59,6 +59,7 @@ import java.util.concurrent.atomic.AtomicLong;
 final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     private static final int STREAM_BUFFER_COUNT = 4;
     private static final double NANOS_TO_SECONDS = 1.0 / 1_000_000_000.0;
+    private static final double CALIBRATION_RATE_EPSILON = 0.000_001;
     private static final long STATIC_PROCESSOR_RETRY_NANOS = 250_000_000L;
 
     private final AuralisAL al;
@@ -424,14 +425,8 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                     expectedSeconds - actual, 1.0);
         }
         switch (result.action()) {
-            case SETTLED -> {
-                calibrationRateMultiplier = 1.0;
-                pushNonGainParamsIfBound();
-            }
-            case SMOOTH -> {
-                calibrationRateMultiplier = result.rateMultiplier();
-                pushNonGainParamsIfBound();
-            }
+            case SETTLED -> updateCalibrationRate(1.0);
+            case SMOOTH -> updateCalibrationRate(result.rateMultiplier());
             case HARD_SEEK -> {
                 calibrationRateMultiplier = 1.0;
                 setLogicalCursor(expectedSeconds);
@@ -439,6 +434,13 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             }
         }
         return result;
+    }
+
+    private void updateCalibrationRate(double requestedRate) {
+        double next = clamp(requestedRate, 0.5, 1.5);
+        if (Math.abs(next - calibrationRateMultiplier) <= CALIBRATION_RATE_EPSILON) return;
+        calibrationRateMultiplier = next;
+        pushNonGainParamsIfBound();
     }
 
     CompletableFuture<Void> awaitAudioCommit() {

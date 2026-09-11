@@ -6,7 +6,7 @@
 - Server-owned `ServerSoundInstance` and immutable `AuralisSoundSpec`.
 - Service-tick authoritative playback with epoch/revision ordering.
 - Client execution ACK aggregation and deterministic timeout/disconnect results.
-- Chunked atomic late-join, dimension-change and heartbeat snapshots.
+- Chunked atomic late-join and dimension-change snapshots with event-driven state replication.
 - RTT midpoint server tick estimator.
 - Buffered and streamed physical-cursor calibration.
 - Coalesced asynchronous recovery from OpenAL, storage and custom-source stalls.

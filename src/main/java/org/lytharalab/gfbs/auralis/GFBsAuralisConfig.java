@@ -31,7 +31,6 @@ public class GFBsAuralisConfig {
         public final ForgeConfigSpec.BooleanValue enableRemoteSounds;
         public final ForgeConfigSpec.BooleanValue allowClientRequests;
         public final ForgeConfigSpec.IntValue acknowledgementTimeoutTicks;
-        public final ForgeConfigSpec.IntValue timelineSyncIntervalTicks;
 
         ServerConfig(ForgeConfigSpec.Builder builder) {
             builder.comment("Server configuration for GFBS-Auralis")
@@ -56,10 +55,6 @@ public class GFBsAuralisConfig {
             acknowledgementTimeoutTicks = builder
                     .comment("Ticks a server operation waits for client execution acknowledgements")
                     .defineInRange("acknowledgementTimeoutTicks", 100, 20, 1200);
-
-            timelineSyncIntervalTicks = builder
-                    .comment("Interval for authoritative heartbeat snapshots")
-                    .defineInRange("timelineSyncIntervalTicks", 10, 1, 200);
 
             builder.pop();
         }
@@ -122,8 +117,8 @@ public class GFBsAuralisConfig {
                     .define("enableHrtf", false);
 
             clockProbeIntervalTicks = builder
-                    .comment("Interval for server service-tick RTT probes")
-                    .defineInRange("clockProbeIntervalTicks", 40, 5, 1200);
+                    .comment("Interval for low-rate server clock probes while authoritative sounds exist (0 disables maintenance probes; startup sampling still runs)")
+                    .defineInRange("clockProbeIntervalTicks", 1200, 0, 12000);
 
             timelineSettledToleranceMs = builder
                     .comment("Physical cursor error treated as settled, in milliseconds")
