@@ -3,6 +3,7 @@ package org.lytharalab.gfbs.auralis.network;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraftforge.network.NetworkEvent;
 import org.lytharalab.gfbs.auralis.ClientSoundController;
+import org.lytharalab.gfbs.auralis.api.AuralisPlaybackParameters;
 import org.lytharalab.gfbs.auralis.tween.EasingDirection;
 import org.lytharalab.gfbs.auralis.tween.EasingStyle;
 
@@ -34,7 +35,9 @@ public class TweenControlPacket {
                               EasingStyle easingStyle, EasingDirection easingDirection) {
         this.property = property;
         this.id = id;
-        this.targetX = targetX;
+        this.targetX = property == Property.PITCH
+                ? AuralisPlaybackParameters.pitch((float) targetX)
+                : targetX;
         this.targetY = targetY;
         this.targetZ = targetZ;
         this.duration = duration;

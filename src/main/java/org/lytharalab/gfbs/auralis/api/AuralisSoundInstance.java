@@ -93,12 +93,19 @@ public interface AuralisSoundInstance {
         return 0.0;
     }
 
+    /** Nonnegative linear gain; 1 is unity and 2 is approximately +6 dB, subject to device limits. */
     AuralisSoundInstance setVolume(float volume);
     float getVolume();
 
+    /**
+     * Clamped to [0.01, 32]. The logical clock and submitted OpenAL pitch clamp
+     * pitch * speed to the same range. The driver's resampler may impose a lower
+     * audible rate; Auralis does not perform software resampling to bypass it.
+     */
     AuralisSoundInstance setPitch(float pitch);
     float getPitch();
 
+    /** Clamped to [0.01, 8]; combines with pitch as documented by {@link #setPitch(float)}. */
     AuralisSoundInstance setSpeed(float speed);
     float getSpeed();
 

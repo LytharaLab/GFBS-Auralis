@@ -15,6 +15,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkEvent;
 import org.lytharalab.gfbs.auralis.ClientSoundController;
+import org.lytharalab.gfbs.auralis.api.AuralisPlaybackParameters;
 
 import java.util.function.Supplier;
 
@@ -72,7 +73,10 @@ public class SoundControlPacket {
         this.id = id;
         this.soundEventId = soundEventId;
         this.volume = volume;
-        this.pitch = pitch;
+        this.pitch = switch (action) {
+            case PLAY, STREAMED_PLAY, SET_PITCH -> AuralisPlaybackParameters.pitch(pitch);
+            default -> pitch;
+        };
         this.speed = speed;
         this.isStatic = isStatic;
         this.x = x;

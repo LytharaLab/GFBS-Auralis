@@ -24,7 +24,7 @@ package org.lytharalab.gfbs.auralis.network;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.util.Mth;
+import org.lytharalab.gfbs.auralis.api.AuralisPlaybackParameters;
 import net.minecraftforge.network.NetworkEvent;
 import org.lytharalab.gfbs.auralis.GFBsAuralisConfig;
 import org.lytharalab.gfbs.auralis.server.AuralisServerManager;
@@ -66,8 +66,8 @@ public class SyncSoundPacket {
                 if (!GFBsAuralisConfig.SERVER.allowClientSync.get()) {
                     return;
                 }
-                float volume = Mth.clamp(packet.volume, 0.0f, 1.0f);
-                float pitch = Mth.clamp(packet.pitch, 0.01f, 8.0f);
+                float volume = AuralisPlaybackParameters.volume(packet.volume);
+                float pitch = AuralisPlaybackParameters.pitch(packet.pitch);
                 AuralisServerManager.syncSound(player, packet.soundId, volume, pitch, packet.looping);
             }
         });

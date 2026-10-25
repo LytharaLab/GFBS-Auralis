@@ -25,6 +25,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.PacketDistributor;
 import org.lytharalab.gfbs.auralis.network.BindControlPacket;
+import org.lytharalab.gfbs.auralis.api.AuralisPlaybackParameters;
 import org.lytharalab.gfbs.auralis.network.BusControlPacket;
 import org.lytharalab.gfbs.auralis.network.NetworkHandler;
 import org.lytharalab.gfbs.auralis.network.SoundControlPacket;
@@ -74,7 +75,7 @@ public final class SoundCommand {
         ArgumentBuilder<CommandSourceStack, ?> tweenPitch = Commands.literal("pitch")
                 .then(Commands.argument("id", StringArgumentType.string())
                         .then(Commands.argument("duration", FloatArgumentType.floatArg(0.0f))
-                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f))
+                                .then(Commands.argument("value", FloatArgumentType.floatArg(0.0f, AuralisPlaybackParameters.MAX_PITCH))
                                         .executes(ctx -> tween(ctx, TweenControlPacket.Property.PITCH, null))
                                         .then(Commands.argument("easing-style", StringArgumentType.word())
                                                 .suggests(SUGGEST_EASING_STYLES)
@@ -246,7 +247,7 @@ public final class SoundCommand {
                                 .then(Commands.argument("sound", ResourceArgument.resource(buildContext, Registries.SOUND_EVENT))
                                         .then(Commands.argument("id", StringArgumentType.string())
                                                 .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f))
-                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f))
+                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f, AuralisPlaybackParameters.MAX_PITCH))
                                                                 .then(Commands.argument("speed", FloatArgumentType.floatArg(0.0f))
                                                                         .then(Commands.argument("static", BoolArgumentType.bool())
                                                                                 .then(Commands.argument("position", Vec3Argument.vec3())
@@ -263,7 +264,7 @@ public final class SoundCommand {
                                 .then(Commands.argument("sound", ResourceArgument.resource(buildContext, Registries.SOUND_EVENT))
                                         .then(Commands.argument("id", StringArgumentType.string())
                                                 .then(Commands.argument("volume", FloatArgumentType.floatArg(0.0f))
-                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f))
+                                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f, AuralisPlaybackParameters.MAX_PITCH))
                                                                 .then(Commands.argument("speed", FloatArgumentType.floatArg(0.0f))
                                                                         .then(Commands.argument("static", BoolArgumentType.bool())
                                                                                 .then(Commands.argument("position", Vec3Argument.vec3())
@@ -299,7 +300,7 @@ public final class SoundCommand {
                                                         .executes(ctx -> setVolume(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "volume"), EntityArgument.getPlayers(ctx, "targets")))))))
                 .then(Commands.literal("pitch")
                         .then(Commands.argument("id", StringArgumentType.string())
-                                .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f))
+                                .then(Commands.argument("pitch", FloatArgumentType.floatArg(0.0f, AuralisPlaybackParameters.MAX_PITCH))
                                         .executes(ctx -> setPitch(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "pitch"), null))
                                         .then(Commands.argument("targets", EntityArgument.players())
                                                 .executes(ctx -> setPitch(ctx, StringArgumentType.getString(ctx, "id"), FloatArgumentType.getFloat(ctx, "pitch"), EntityArgument.getPlayers(ctx, "targets")))))))

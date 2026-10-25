@@ -8,6 +8,7 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundEvent;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundInstance;
+import org.lytharalab.gfbs.auralis.api.AuralisPlaybackParameters;
 import org.lytharalab.gfbs.auralis.api.AuralisSoundListener;
 import org.lytharalab.gfbs.auralis.api.bus.AudioBusSystem;
 import org.lytharalab.gfbs.auralis.api.effect.PcmEffect;
@@ -334,11 +335,10 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
     @Override
     public AuralisSoundInstance setVolume(float volume) {
-        float v = Float.isFinite(volume) ? volume : 0.0f;
-        this.volume = Math.max(0.0f, v);
+        this.volume = AuralisPlaybackParameters.volume(volume);
         if (source == null) {
             // Avoid a stale smoothing value causing a gain spike when materialized.
-            this.smoothedVolume = this.volume * busGain;
+            this.smoothedVolume = combinedVolume();
         }
         // Gain is deliberately NOT pushed here. The voice manager/attenuation pass
         // applies gain using the current listener position, preventing one-frame
@@ -354,8 +354,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     @Override
     public AuralisSoundInstance setPitch(float pitch) {
         syncLogicalClock(System.nanoTime());
-        float p = Float.isFinite(pitch) ? pitch : 1.0f;
-        this.pitch = clamp(p, 0.01f, 8.0f);
+        this.pitch = AuralisPlaybackParameters.pitch(pitch);
         pushNonGainParamsIfBound();
         return this;
     }
@@ -368,8 +367,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     @Override
     public AuralisSoundInstance setSpeed(float speed) {
         syncLogicalClock(System.nanoTime());
-        float s = Float.isFinite(speed) ? speed : 1.0f;
-        this.speed = clamp(s, 0.01f, 8.0f);
+        this.speed = AuralisPlaybackParameters.speed(speed);
         pushNonGainParamsIfBound();
         return this;
     }
@@ -560,7 +558,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         Objects.requireNonNull(route, "route");
         busRoute = route;
         busGain = Math.max(0.0f, route.gain());
-        if (source == null) smoothedVolume = volume * busGain;
+        if (source == null) smoothedVolume = combinedVolume();
         if (!route.busName().equals(busName)) busName = route.busName();
         if (busProcessorSignature == route.pcmSignature()) return;
 
@@ -778,7 +776,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         if (nowNanos <= previous) return;
 
         double elapsed = (nowNanos - previous) * NANOS_TO_SECONDS;
-        double rate = clamp(pitch * speed, 0.01f, 8.0f);
+        double rate = AuralisPlaybackParameters.playbackRate(pitch, speed);
         logicalPlaybackSeconds += elapsed * rate;
 
         if (looping && durationSeconds > 0.0) {
@@ -788,7 +786,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     float estimateAudibleGain(Vec3 listenerPos, float attenuationExponent) {
-        float baseVolume = Math.max(0.0f, volume * busGain);
+        float baseVolume = combinedVolume();
         if (baseVolume <= 0.0f) return 0.0f;
         if (isStatic) return baseVolume;
 
@@ -877,15 +875,16 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
                 final int sourceId = handle.sourceId();
                 final double cursor = initialBufferedStart ? 0.0 : normalizedCursorForPlayback();
                 final float initialGain = estimateAudibleGain(listenerPos, attenuationExponent);
-                smoothedVolume = volume * busGain;
+                smoothedVolume = combinedVolume();
 
                 al.executeBlocking(() -> {
                     if (source != handle) return;
                     if (initialBufferedStart && !initialBufferedPlayback.isCurrent(initialBufferedStartToken)) return;
                     resetSourceOnALThread(sourceId);
+                    AuralisAL.configureSourceGainOnALThread(sourceId, al.sourceGainLimit());
                     applyNonGainParams(sourceId);
                     effectRack.applyToSourceOnALThread(sourceId, busRoute);
-                    AL10.alSourcef(sourceId, AL10.AL_GAIN, initialGain);
+                    applyGainOnALThread(sourceId, initialGain);
 
                     if (isStreamed) {
                         AL10.alSourcei(sourceId, AL10.AL_LOOPING, AL10.AL_FALSE);
@@ -1010,6 +1009,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
 
             if (isStreamed) {
                 resetSourceOnALThread(sourceId);
+                AuralisAL.configureSourceGainOnALThread(sourceId, al.sourceGainLimit());
                 applyNonGainParams(sourceId);
                 effectRack.applyToSourceOnALThread(sourceId, busRoute);
                 // Keep the current safe gain; the next attenuation pass updates it.
@@ -1091,7 +1091,7 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
     }
 
     private void applyNonGainParams(int sourceId) {
-        float effectivePitch = clamp(pitch * speed, 0.01f, 8.0f);
+        float effectivePitch = AuralisPlaybackParameters.playbackRate(pitch, speed);
         AL10.alSourcef(sourceId, AL10.AL_PITCH, effectivePitch);
 
         if (isStatic) {
@@ -1121,12 +1121,12 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
             float volumeSmoothing
     ) {
         float smoothing = clamp(volumeSmoothing, 0.0f, 1.0f);
-        float targetVolume = Math.max(0.0f, volume * busGain);
+        float targetVolume = combinedVolume();
         float smoothed = smoothedVolume + (targetVolume - smoothedVolume) * smoothing;
         smoothedVolume = smoothed;
 
         if (isStatic) {
-            AL10.alSourcef(sourceId, AL10.AL_GAIN, Math.max(0.0f, smoothed));
+            applyGainOnALThread(sourceId, smoothed);
             return;
         }
 
@@ -1141,7 +1141,16 @@ final class AuralisSoundInstanceImpl implements AuralisSoundInstance {
         float shaped = factor <= 0.0f
                 ? 0.0f
                 : (factor >= 1.0f ? 1.0f : (float) Math.pow(factor, exp));
-        AL10.alSourcef(sourceId, AL10.AL_GAIN, Math.max(0.0f, smoothed * shaped));
+        applyGainOnALThread(sourceId, smoothed * shaped);
+    }
+
+    private float combinedVolume() {
+        return AuralisPlaybackParameters.combinedVolume(volume, busGain);
+    }
+
+    private void applyGainOnALThread(int sourceId, float gain) {
+        AL10.alSourcef(sourceId, AL10.AL_GAIN,
+                Math.min(al.sourceGainLimit(), AuralisPlaybackParameters.volume(gain)));
     }
 
     private void swapPendingStaticBufferOnALThread(int sourceId) {

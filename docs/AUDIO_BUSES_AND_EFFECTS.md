@@ -26,6 +26,8 @@ Bus names are case-sensitive, 1–96 characters long, and accept letters, digits
 
 `AudioBusSystem.view(name)` exposes an immutable compiled view containing the route, effective volume, audibility, ordered effects, and revision. The hot path uses the same immutable snapshot and rebuilds it only after a bus or effect revision changes.
 
+Bus volumes and compiled route products are bounded to `0`–`16`. Since 2.3.2, the native source gain ceiling is raised to the device's reported `AL_SOFT_gain_clamp_ex` limit, so values above unity can amplify the output. For example, `setVolume(2)` doubles linear amplitude (approximately +6 dB), subject to output limiting/clipping. On devices without that extension, Auralis warns once at initialization and retains the legacy unity ceiling. The change applies to buffered/streamed and listener-relative/world-positioned voices, including live gain changes and recycled sources.
+
 ## Effect order and backends
 
 Effects are collected from the voice's assigned bus toward `Master`. For example:
