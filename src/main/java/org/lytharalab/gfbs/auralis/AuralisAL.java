@@ -219,6 +219,8 @@ public final class AuralisAL implements AutoCloseable {
     private volatile ALCCapabilities alcCaps;
     private volatile ALCapabilities alCaps;
 
+    private volatile float sourceGainLimit = 1.0f;
+
     private volatile boolean usingThreadLocalContext;
 
     private final AtomicReference<Throwable> fatalError;
@@ -405,6 +407,27 @@ public final class AuralisAL implements AutoCloseable {
     public long contextHandle() { ensureRunning(); return contextHandle; }
     public ALCCapabilities alcCapabilities() { ensureRunning(); return alcCaps; }
     public ALCapabilities alCapabilities() { ensureRunning(); return alCaps; }
+
+    float sourceGainLimit() { return sourceGainLimit; }
+
+    static float querySourceGainLimitOnALThread() {
+        if (!AL.getCapabilities().AL_SOFT_gain_clamp_ex) return 1.0f;
+        float limit = alGetFloat(SOFTGainClampEx.AL_GAIN_LIMIT_SOFT);
+        int error = alGetError();
+        if (error != AL_NO_ERROR || !Float.isFinite(limit) || limit < 1.0f) {
+            throw new IllegalStateException("Invalid OpenAL source gain limit: " + limit
+                    + " (AL error=0x" + Integer.toHexString(error) + ")");
+        }
+        return limit;
+    }
+
+    static void configureSourceGainOnALThread(int sourceId, float limit) {
+        // Silence before restoring pooled-source bounds, so stale MIN_GAIN cannot
+        // leak a previous owner's sound. Legacy devices only accept MAX_GAIN <= 1.
+        alSourcef(sourceId, AL_GAIN, 0.0f);
+        alSourcef(sourceId, AL_MIN_GAIN, 0.0f);
+        alSourcef(sourceId, AL_MAX_GAIN, limit);
+    }
 
     public SourceBudget querySourceBudget() {
         ensureRunning();
@@ -597,6 +620,18 @@ public final class AuralisAL implements AutoCloseable {
 
         this.alCaps = AL.createCapabilities(this.alcCaps);
 
+        try {
+            this.sourceGainLimit = querySourceGainLimitOnALThread();
+        } catch (IllegalStateException invalidLimit) {
+            this.sourceGainLimit = 1.0f;
+            GFBsAuralis.LOGGER.warn("Cannot query OpenAL amplification limit; retaining legacy unity ceiling", invalidLimit);
+        }
+        if (sourceGainLimit <= 1.0f) {
+            GFBsAuralis.LOGGER.warn("OpenAL source gain is limited to 1; amplification above 100% requires AL_SOFT_gain_clamp_ex and a higher device gain limit");
+        } else {
+            GFBsAuralis.LOGGER.info("OpenAL source amplification enabled (gain limit={})", sourceGainLimit);
+        }
+
         AL10.alDistanceModel(AL10.AL_INVERSE_DISTANCE_CLAMPED);
 
         AL10.alDopplerFactor(1.0f);
@@ -644,6 +679,7 @@ public final class AuralisAL implements AutoCloseable {
 
         this.alCaps = null;
         this.alcCaps = null;
+        this.sourceGainLimit = 1.0f;
         this.usingThreadLocalContext = false;
     }
 

@@ -23,8 +23,8 @@ package org.lytharalab.gfbs.auralis.server;
  */
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.util.Mth;
 import org.lytharalab.gfbs.auralis.GFBsAuralisConfig;
+import org.lytharalab.gfbs.auralis.api.AuralisPlaybackParameters;
 import org.lytharalab.gfbs.auralis.network.LoopSoundPacket;
 import org.lytharalab.gfbs.auralis.network.NetworkHandler;
 import org.lytharalab.gfbs.auralis.network.PlaySoundPacket;
@@ -52,8 +52,8 @@ public class AuralisServerManager {
             return;
         }
 
-        float v = Mth.clamp(volume, 0.0f, 1.0f);
-        float p = Mth.clamp(pitch, 0.01f, 8.0f);
+        float v = AuralisPlaybackParameters.volume(volume);
+        float p = AuralisPlaybackParameters.pitch(pitch);
         sounds.put(soundId, new SoundState(v, p, looping));
 
         NetworkHandler.CHANNEL.sendTo(new PlaySoundPacket(soundId, v, p, looping),
@@ -90,8 +90,8 @@ public class AuralisServerManager {
         if (!canUpsertSound(sounds, soundId)) {
             return;
         }
-        float v = Mth.clamp(volume, 0.0f, 1.0f);
-        float p = Mth.clamp(pitch, 0.01f, 8.0f);
+        float v = AuralisPlaybackParameters.volume(volume);
+        float p = AuralisPlaybackParameters.pitch(pitch);
         sounds.put(soundId, new SoundState(v, p, looping));
     }
 

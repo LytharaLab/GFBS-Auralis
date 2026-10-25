@@ -188,3 +188,26 @@ tasks.withType(JavaCompile).configureEach {
 tasks.withType(JavaCompile).configureEach {
     options.warnings = false
 }
+
+// Numeric/routing regressions run without a game or audio device. Native loopback
+// is opt-in so ordinary check/build also work on hosts without OpenAL natives.
+tasks.register('playbackRegression', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'org.lytharalab.gfbs.auralis.PlaybackRegression'
+    workingDir = layout.buildDirectory.dir('verification/playback').get().asFile
+    doFirst { workingDir.mkdirs() }
+}
+
+tasks.named('check').configure {
+    dependsOn tasks.named('playbackRegression')
+}
+
+tasks.register('nativePlaybackRegression', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'org.lytharalab.gfbs.auralis.PlaybackRegression'
+    args '--native'
+    workingDir = layout.buildDirectory.dir('verification/playback').get().asFile
+    doFirst { workingDir.mkdirs() }
+}
